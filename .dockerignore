@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+.env
+.git/
+.gitignore
+*.log
+.DS_Store
+.streamlit/secrets.toml
+tests/
+*.zip
+# sample OUTPUT files only - the *_template.xlsx files are REQUIRED at runtime
+ABERCROMBIE/Style__*.xlsx
+ABERCROMBIE/Style__*.pdf
