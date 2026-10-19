@@ -27,6 +27,12 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 import grid_editor
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:                     # pl_kit.py lives in the project root
+    _sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 
 
 # ============================================================
@@ -528,11 +534,21 @@ def run(pdf_file=None):
         key=_size_sort_key,
     )
 
-    with st.sidebar:
-        st.markdown("### Carton settings")
+    st.success(
+        f"PO **{data['po_no']}** · Style **{data['style']}** · "
+        f"**{len(data['colors'])}** color(s) · {data['row_count']} item row(s) parsed"
+    )
+    kit.step(1, "PO summary")
+    kit.summary_cards([("PO", str(data["po_no"])), ("Style", str(data["style"])),
+                       ("Colours", f"{len(data['colors'])}"), ("Sizes", f"{len(sizes_in_po)}"),
+                       ("Item rows", f"{data['row_count']}")])
+
+    kit.step(2, "Variables", "Not in the PO - edit if different. The carton tables below update straight away.")
+    with st.container(border=True):
+        st.markdown("**Carton settings**")
         cap = st.number_input("Pieces per full carton", 1, 200, DEFAULT_CAP, 1, key=f"br_cap_{data['po_no']}")
 
-        st.markdown("### Net weight (kg / piece)")
+        st.markdown("**Net weight (kg / piece)**")
         st.caption(f"{len(sizes_in_po)} size(s) detected in this PO — edit values:")
 
         wdf = pd.DataFrame({
@@ -556,14 +572,14 @@ def run(pdf_file=None):
             if str(row.get("SIZE", "")).strip() and pd.notna(row["NET kg / pc"])
         }
 
-        st.markdown("### Net-net offset (kg)")
+        st.markdown("**Net-net offset (kg)**")
         nn_offset = st.number_input(
             "N.WT − N.N.WT", 0.0, 1.0, float(DEFAULT_NN_OFFSET), 0.01,
             key=f"br_nno_{data['po_no']}",
             help="Amount subtracted from N.WT to produce N.N.WT in the header.",
         )
 
-        st.markdown("### Empty carton weight (kg)")
+        st.markdown("**Empty carton weight (kg)**")
         edf = pd.DataFrame({
             "TYPE": list(DEFAULT_EMPTY.keys()),
             "EMPTY kg": [DEFAULT_EMPTY[t] for t in DEFAULT_EMPTY],
@@ -575,12 +591,11 @@ def run(pdf_file=None):
         )
         empty_by_type = {t: float(edited_e.loc[t, "EMPTY kg"]) for t in edited_e.index}
 
-    st.success(
-        f"PO **{data['po_no']}** · Style **{data['style']}** · "
-        f"**{len(data['colors'])}** color(s) · {data['row_count']} item row(s) parsed"
-    )
-
+    kit.step(3, "Carton tables",
+             "One editable grid per colour. Click a cell to change it, add or delete carton rows in the grid; "
+             "the ORDER QTY / TOTAL / REMAIN rows update live and edited cells get a green border.")
     edited_plans = {}
+    order_by = {}
 
     for (cc, cname), items in data["colors"].items():
         full_style = next((it["full_style"] for it in items if it["full_style"]), "—")
@@ -591,6 +606,7 @@ def run(pdf_file=None):
             label = f"{it['size']} {it['suffix'][:1].upper()}"
             sizes_qty[label] = sizes_qty.get(label, 0) + it["qty"]
         size_list = list(sizes_qty.keys())
+        order_by[cname] = dict(sizes_qty)
 
         # Generate initial default plan
         plan = build_plan(sizes_qty, int(cap))
@@ -621,7 +637,25 @@ def run(pdf_file=None):
         )
         edited_plans[(cc, cname)] = grid_res["rows"]
 
-    st.divider()
+    # ---- 4 check (all colours together)
+    kit.step(4, "Check against the PO")
+    labels, order_d, packed_d = [], {}, {}
+    for (cc, cname), rows_ in edited_plans.items():
+        for sz, q in order_by.get(cname, {}).items():
+            lab = f"{cname} / {sz}" if len(edited_plans) > 1 else sz
+            labels.append(lab)
+            order_d[lab] = q
+            packed_d[lab] = sum(int((r.get("sizes") or {}).get(sz, 0) or 0) * int(r.get("total_ctn", 0) or 0)
+                                for r in rows_)
+    if labels:
+        kit.check_by_size(labels, order_d, packed_d)
+        kit.summary_cards([
+            ("Cartons", f"{sum(int(r.get('total_ctn', 0) or 0) for rs in edited_plans.values() for r in rs):,}"),
+            ("Pieces", f"{sum(packed_d.values()):,}"),
+            ("Order pcs", f"{sum(order_d.values()):,}"),
+        ])
+
+    kit.step(5, "Download")
     prep_col1, prep_col2 = st.columns([1, 2])
     with prep_col1:
         if st.button("Prepare packing list (.xlsx)", type="primary", key=f"br_prep_{data['po_no']}"):

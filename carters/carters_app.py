@@ -34,6 +34,12 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 import grid_editor
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:                     # pl_kit.py lives in the project root
+    _sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 
 # ============================================================
 # CONSTANTS / DEFAULTS
@@ -790,9 +796,11 @@ def _render_summary_table(sh, head):
     )
     st.dataframe(styler, use_container_width=True, hide_index=True)
 def _line_ui(head, ln, key):
-    st.markdown(f"#### Line **{ln['line']}** — {ln['dest'] or '(no destination found)'}")
     total_q = sum(ln["qty"].values())
-    st.caption(f"PO qty: {total_q:,} pcs   " +
+    kit.step(1, f"PO line {ln['line']}")
+    kit.summary_cards([("Line", str(ln["line"])), ("PO qty", f"{total_q:,}"),
+                       ("Style", str(head.get("style", ""))), ("Season", str(head.get("season", "")))])
+    st.caption(f"Destination: {ln['dest'] or '(no destination found)'}  ·  " +
                "  ".join(f"{s}: {ln['qty'][s]}" for s in SIZES))
 
     if total_q == 0:
@@ -801,6 +809,7 @@ def _line_ui(head, ln, key):
         with st.expander("Raw text of this block (debug)", expanded=True):
             st.code(ln["raw"][:3000])
 
+    kit.step(2, "Packing settings", "Choose the packing mode, pieces per carton / ratio and weights.")
     mode = st.radio(
         "Packing mode",
         ["solid_size", "assort_size", "single_mixed"],
@@ -872,6 +881,9 @@ def _line_ui(head, ln, key):
             "total_ctn": int(r.get("ctn", 1)),
         })
 
+    kit.step(3, "Carton table",
+             "Edit cells, add or delete carton rows in the grid. ORDER QTY / TOTAL / REMAIN stay pinned and update live; "
+             "edited cells get a green border. Changing the packing settings above rebuilds the table.")
     # Header info block
     _render_header(head, {
         "line": ln["line"], "mode": mode, "dim": dim, "date": datetime.date.today(),
@@ -955,6 +967,12 @@ def _line_ui(head, ln, key):
     nw  = sum(r["net"]   * r["ctn"] for r in edited_carton_rows)
     cbm = sum(r["m3"]    * r["ctn"] for r in edited_carton_rows)
 
+    kit.step(4, "Check against the PO")
+    packed = {sz: sum(r["sizes"].get(sz, 0) * r["ctn"] for r in edited_carton_rows) for sz in SIZES}
+    kit.check_by_size(list(SIZES), {sz: ln["qty"].get(sz, 0) for sz in SIZES}, packed)
+    kit.summary_cards([("Cartons", f"{tot_ctn:,}"), ("Pieces", f"{tot_pcs:,}"), ("CBM", f"{cbm:.3f}"),
+                       ("Gross kg", f"{gw:,.1f}"), ("Net kg", f"{nw:,.1f}")])
+
     sh = {
         "line":      ln["line"],
         "mode":      mode,
@@ -993,30 +1011,11 @@ def run(pdf_file=None):
         with tab:
             sheets.append(_line_ui(head, ln, key=f"ct_{head['po']}_{ln['line']}"))
 
-    st.divider()
-    prep_col1, prep_col2 = st.columns([1, 2])
-    with prep_col1:
-        if st.button("Prepare packing list (.xlsx)", type="primary", key=f"ct_prep_{head['po']}"):
-            wb = build_workbook(head, sheets)
-            buf = io.BytesIO()
-            wb.save(buf)
-            st.session_state[f"ct_xlsx_{head['po']}"] = buf.getvalue()
-            st.success("Packing list workbook updated with latest edits!")
-
-    xlsx_data = st.session_state.get(f"ct_xlsx_{head['po']}")
-    if xlsx_data is None:
-        wb = build_workbook(head, sheets)
-        buf = io.BytesIO()
-        wb.save(buf)
-        xlsx_data = buf.getvalue()
-        st.session_state[f"ct_xlsx_{head['po']}"] = xlsx_data
-
-    st.download_button(
-        "⬇ Download packing list (.xlsx)",
-        data=xlsx_data,
-        file_name=f"packing_list_{head['po']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"ct_dl_{head['po']}")
+    kit.step(5, "Download", "One Excel file with a sheet for every line. It always contains your latest edits.")
+    wb = build_workbook(head, sheets)
+    buf = io.BytesIO()
+    wb.save(buf)
+    kit.download_block("⬇ Download packing list (Excel)", buf.getvalue(), f"packing_list_{head['po']}.xlsx")
 
 
 if __name__ == "__main__":

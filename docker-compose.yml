@@ -6,11 +6,15 @@ services:
     ports:
       - "8003:8003"
     restart: unless-stopped
+    volumes:
+      - po_data:/app/data          # keeps the database when the container is rebuilt
     environment:
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
       - STREAMLIT_SERVER_PORT=8003
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-    # optional: mount the source folder to live-edit without rebuilding
-    # volumes:
+    # optional: to live-edit without rebuilding, add this line under the volumes above:
     #   - ./:/app
+
+volumes:
+  po_data:

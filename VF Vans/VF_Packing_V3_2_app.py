@@ -19,6 +19,12 @@ import uuid
 import datetime
 
 import pdfplumber
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:                     # pl_kit.py lives in the project root
+    _sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 import streamlit as st
 import streamlit.components.v1 as components
 from openpyxl import Workbook
@@ -179,6 +185,25 @@ def _set_state(key, value):
 
 
 _HAS_FRAGMENT = hasattr(st, "fragment")
+
+
+def _vf_remove_ticked(style_key, rows_key, defaults_key):
+    """Remove every carton row whose 🗑 box is ticked (always keeps at least one row)."""
+    rows = st.session_state.get(rows_key) or []
+    tick = lambda r: bool(st.session_state.get(f"del_v8_{style_key}_{r['id']}"))
+    keep = [r for r in rows if not tick(r)]
+    if not keep and rows:
+        keep = rows[:1]
+    gone = [r["id"] for r in rows if r not in keep]
+    d = st.session_state.get(defaults_key, {})
+    for rid in gone:
+        d.pop(rid, None)
+    st.session_state[defaults_key] = d
+    st.session_state[rows_key] = keep
+    for k in list(st.session_state.keys()):
+        if k.startswith(f"del_v8_{style_key}_") or any(
+                k.startswith(f"sz_v8_{style_key}_{rid}_") or k == f"tctn_v8_{style_key}_{rid}" for rid in gone):
+            st.session_state.pop(k, None)
 
 
 def _fragment(fn):
@@ -2157,11 +2182,14 @@ def _sticky_sel(prefix):
     """CSS selector list matching the wrapper(s) that sit directly inside the
     scroller (.st-key-carton_grid) and contain the keyed row container."""
     p = f'[class*="st-key-{prefix}"]'
+    # `*:has(p)` (any depth) instead of `*:has(> p)`: older Streamlit puts the keyed row
+    # container TWO levels under the scroller (BorderWrapper > div > keyed block), so a
+    # one-level match left the header / ORDER / TOTAL / REMAIN rows un-pinned (they scrolled).
     return (
-        f'.st-key-carton_grid > *:has(> {p}), '
-        f'.st-key-carton_grid > [data-testid="stVerticalBlock"] > *:has(> {p}), '
+        f'.st-key-carton_grid > *:has({p}), '
+        f'.st-key-carton_grid > [data-testid="stVerticalBlock"]:not([class*="st-key-grid_"]) > *:has({p}), '
         f'.st-key-carton_grid > {p}, '
-        f'.st-key-carton_grid > [data-testid="stVerticalBlock"] > {p}'
+        f'.st-key-carton_grid > [data-testid="stVerticalBlock"]:not([class*="st-key-grid_"]) > {p}'
     )
 
 
@@ -2327,12 +2355,11 @@ def render_packing_list_preview(line, sublines):
     LEFT_W_CTN = CELL_WIDTH
     LEFT_W_COL = COLOR_WIDTH
     LEFT_W_UPC = UPC_WIDTH
-    OFF_1 = 0
-    OFF_2 = LEFT_W_A
-    OFF_3 = LEFT_W_A + LEFT_W_A
-    OFF_4 = OFF_3 + LEFT_W_N
-    OFF_5 = OFF_4 + LEFT_W_CTN
-    OFF_6 = OFF_5 + LEFT_W_COL
+    OFF_1 = 0                      # 🗑 tick column
+    OFF_2 = LEFT_W_A               # #
+    OFF_3 = OFF_2 + LEFT_W_N       # Ctn No
+    OFF_4 = OFF_3 + LEFT_W_CTN     # Color
+    OFF_5 = OFF_4 + LEFT_W_COL     # UPC
 
     SEL_HDR = _sticky_sel("grid_hdr_")
     SEL_ORD = _sticky_sel("grid_ord_")
@@ -2360,6 +2387,8 @@ def render_packing_list_preview(line, sublines):
 
         /* Kill any overflow:hidden that would break sticky */
         .st-key-carton_grid [data-testid="stVerticalBlock"],
+        .st-key-carton_grid [data-testid="stVerticalBlockBorderWrapper"],
+        .st-key-carton_grid [data-testid="stLayoutWrapper"],
         .st-key-carton_grid [data-testid="stElementContainer"],
         .st-key-carton_grid [data-testid="stHorizontalBlock"],
         .st-key-carton_grid [data-testid="stColumn"] {{
@@ -2368,13 +2397,25 @@ def render_packing_list_preview(line, sublines):
 
         /* Flatten the intermediate wrapper (if present) so the row wrappers
            become DIRECT children of the scroller — required for sticky. */
-        .st-key-carton_grid > [data-testid="stVerticalBlock"] {{
+        .st-key-carton_grid > [data-testid="stVerticalBlock"]:not([class*="st-key-grid_"]) {{
             display: contents !important;
         }}
 
         /* Row wrappers: no margins so sticky offsets are exact */
         .st-key-carton_grid > *,
         .st-key-carton_grid > [data-testid="stVerticalBlock"] > * {{
+            margin: 0 !important;
+        }}
+
+        /* Streamlit gives every markdown block a -1rem bottom margin, which made each header /
+           ORDER / TOTAL / REMAIN row 16px shorter than its drawn height. The pinned rows then no
+           longer touched each other and carton rows scrolled through the gaps. Cancel it here. */
+        .st-key-carton_grid [data-testid="stMarkdownContainer"],
+        .st-key-carton_grid [data-testid="stMarkdown"] {{
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+        }}
+        .st-key-carton_grid [data-testid="stMarkdownContainer"] p {{
             margin: 0 !important;
         }}
 
@@ -2410,8 +2451,7 @@ def render_packing_list_preview(line, sublines):
         .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2),
         .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3),
         .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(4),
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(5),
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(6) {{
+        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(5) {{
             position: sticky !important;
             z-index: 6 !important;
             background: white !important;
@@ -2424,37 +2464,39 @@ def render_packing_list_preview(line, sublines):
         }}
         .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2) {{
             left: {OFF_2}px !important;
-            flex: 0 0 {LEFT_W_A}px !important; width: {LEFT_W_A}px !important;
-            min-width: {LEFT_W_A}px !important; max-width: {LEFT_W_A}px !important;
-        }}
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) {{
-            left: {OFF_3}px !important;
             flex: 0 0 {LEFT_W_N}px !important; width: {LEFT_W_N}px !important;
             min-width: {LEFT_W_N}px !important; max-width: {LEFT_W_N}px !important;
         }}
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(4) {{
-            left: {OFF_4}px !important;
+        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) {{
+            left: {OFF_3}px !important;
             flex: 0 0 {LEFT_W_CTN}px !important; width: {LEFT_W_CTN}px !important;
             min-width: {LEFT_W_CTN}px !important; max-width: {LEFT_W_CTN}px !important;
         }}
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(5) {{
-            left: {OFF_5}px !important;
+        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(4) {{
+            left: {OFF_4}px !important;
             flex: 0 0 {LEFT_W_COL}px !important; width: {LEFT_W_COL}px !important;
             min-width: {LEFT_W_COL}px !important; max-width: {LEFT_W_COL}px !important;
         }}
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(6) {{
-            left: {OFF_6}px !important;
+        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(5) {{
+            left: {OFF_5}px !important;
             flex: 0 0 {LEFT_W_UPC}px !important; width: {LEFT_W_UPC}px !important;
             min-width: {LEFT_W_UPC}px !important; max-width: {LEFT_W_UPC}px !important;
             box-shadow: 2px 0 0 0 #94a3b8 !important;
         }}
 
-        /* Non-frozen columns (7 onwards) */
-        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(n+7) {{
+        /* Non-frozen columns (6 onwards) */
+        .st-key-carton_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(n+6) {{
             flex: 0 0 {CELL_WIDTH}px !important;
             width: {CELL_WIDTH}px !important;
             min-width: {CELL_WIDTH}px !important;
             max-width: {CELL_WIDTH}px !important;
+        }}
+
+        /* 🗑 tick box: centred in its cell */
+        .st-key-carton_grid [data-testid="stCheckbox"] {{
+            width: {ACTION_WIDTH}px !important; min-width: {ACTION_WIDTH}px !important;
+            height: {CELL_HEIGHT}px !important; margin: 0 !important; padding: 0 !important;
+            display: flex !important; align-items: center !important; justify-content: center !important;
         }}
 
         /* ============================================================
@@ -2610,7 +2652,8 @@ def render_packing_list_preview(line, sublines):
     )
 
     st.caption(
-        "Main carton table is fully editable. Left columns (Ctn No, Color, UPC) "
+        "Main carton table is fully editable. Add a row with “＋ Add row”; to delete, tick 🗑 on the "
+        "row(s) and press “Remove ticked rows”. Left columns (Ctn No, Color, UPC) "
         "are frozen — they stay put while size columns scroll horizontally. "
         "Header, ORDER QTY, TOTAL and REMAIN stay pinned vertically. "
         "Edited cells get a green border."
@@ -2653,7 +2696,7 @@ def render_packing_list_preview(line, sublines):
     n_rows = len(carton_rows)
 
     col_spec = (
-        [ACTION_WIDTH, ACTION_WIDTH] +
+        [ACTION_WIDTH] +
         [CELL_WIDTH, CELL_WIDTH] +
         [COLOR_WIDTH, UPC_WIDTH] +
         [CELL_WIDTH] * n_sizes +
@@ -2662,7 +2705,7 @@ def render_packing_list_preview(line, sublines):
 
     _rh1, _rh2 = st.columns([1, 6])
     with _rh1:
-        if st.button("🔄 Reset", key=f"reset_rows_v8_{style_key}",
+        if st.button("↺ Reset table to PO", key=f"reset_rows_v8_{style_key}",
                      help="Restore carton rows and MAX values to PDF defaults"):
             st.session_state.pop(rows_key, None)
             st.session_state.pop(max_sig_key, None)
@@ -2686,6 +2729,7 @@ def render_packing_list_preview(line, sublines):
     ctn_ranges = []
     row_colors, row_upcs = [], []
     cum = 0
+    ticked_ids = []
 
     _all_defaults = st.session_state.get(defaults_key, {})
 
@@ -2695,33 +2739,31 @@ def render_packing_list_preview(line, sublines):
         with st.container(key=f"grid_hdr_{style_key}"):
             header_cols = st.columns(col_spec, gap="small")
             with header_cols[0]:
-                st.markdown('<div class="grid-header grid-header-action">+</div>', unsafe_allow_html=True)
+                st.markdown('<div class="grid-header grid-header-action">🗑</div>', unsafe_allow_html=True)
             with header_cols[1]:
-                st.markdown('<div class="grid-header grid-header-action">−</div>', unsafe_allow_html=True)
-            with header_cols[2]:
                 st.markdown('<div class="grid-header">#</div>', unsafe_allow_html=True)
-            with header_cols[3]:
+            with header_cols[2]:
                 st.markdown('<div class="grid-header">Ctn No</div>', unsafe_allow_html=True)
-            with header_cols[4]:
+            with header_cols[3]:
                 st.markdown('<div class="grid-header grid-header-color">Color</div>', unsafe_allow_html=True)
-            with header_cols[5]:
+            with header_cols[4]:
                 st.markdown('<div class="grid-header grid-header-upc">UPC</div>', unsafe_allow_html=True)
             for s_idx, sz in enumerate(full_sizes):
-                with header_cols[6 + s_idx]:
+                with header_cols[5 + s_idx]:
                     st.markdown(f'<div class="grid-header">{sz}</div>', unsafe_allow_html=True)
             extra_headers = ["CTN PCS", "TOTAL CTN", "TOTAL PCS", "Grs/ctn", "Net/ctn", "tot Grs", "tot Net"]
             for e_idx, h in enumerate(extra_headers):
-                with header_cols[6 + n_sizes + e_idx]:
+                with header_cols[5 + n_sizes + e_idx]:
                     st.markdown(f'<div class="grid-header">{h}</div>', unsafe_allow_html=True)
 
         # ORDER QTY
         with st.container(key=f"grid_ord_{style_key}"):
             _hdr_order = {s["size"]: s["qty"] for s in sublines}
             _order_cells = [""] * len(col_spec)
-            _order_cells[4] = "ORDER QTY"
+            _order_cells[3] = "ORDER QTY"
             for s_idx, sz in enumerate(full_sizes):
-                _order_cells[6 + s_idx] = str(_hdr_order.get(sz, ""))
-            _order_cells[8 + n_sizes] = str(sum(_hdr_order.get(sz, 0) for sz in full_sizes))
+                _order_cells[5 + s_idx] = str(_hdr_order.get(sz, ""))
+            _order_cells[7 + n_sizes] = str(sum(_hdr_order.get(sz, 0) for sz in full_sizes))
             order_cols = st.columns(col_spec, gap="small")
             for _c_idx, _txt in enumerate(_order_cells):
                 with order_cols[_c_idx]:
@@ -2737,17 +2779,15 @@ def render_packing_list_preview(line, sublines):
             row_cols = st.columns(col_spec, gap="small")
 
             with row_cols[0]:
-                st.button("＋", key=f"add_v8_{style_key}_{row_id}", help="Add row below",
-                          on_click=_set_state, args=(insert_key, row_index))
+                if st.checkbox("delete row", key=f"del_v8_{style_key}_{row_id}", label_visibility="collapsed",
+                               help="Tick to delete this row, then press “Remove ticked rows” below the table"):
+                    ticked_ids.append(row_id)
             with row_cols[1]:
-                st.button("❌", key=f"del_v8_{style_key}_{row_id}", help="Delete this row",
-                          disabled=n_rows <= 1, on_click=_set_state, args=(delete_key, row_index))
-            with row_cols[2]:
                 st.markdown(f'<div class="data-cell">{row_index + 1}</div>', unsafe_allow_html=True)
 
             current_sizes = {}
             for s_idx, sz in enumerate(full_sizes):
-                with row_cols[6 + s_idx]:
+                with row_cols[5 + s_idx]:
                     sz_key = f"sz_v8_{style_key}_{row_id}_{sz}"
                     current_val = int(row["sizes"].get(sz, 0) or 0)
                     _widget_val = st.session_state.get(sz_key)
@@ -2761,7 +2801,7 @@ def render_packing_list_preview(line, sublines):
                     current_sizes[sz] = int(new_val)
                     carton_rows[row_index]["sizes"][sz] = int(new_val)
 
-            with row_cols[7 + n_sizes]:
+            with row_cols[6 + n_sizes]:
                 tctn_key = f"tctn_v8_{style_key}_{row_id}"
                 current_tctn = int(row.get("total_ctn") or 0)
                 _widget_tctn = st.session_state.get(tctn_key)
@@ -2798,30 +2838,30 @@ def render_packing_list_preview(line, sublines):
             row_colors.append(row.get("color") or default_color)
             row_upcs.append(row.get("upc") or "MIXED")
 
-            with row_cols[3]:
+            with row_cols[2]:
                 st.markdown(f'<div class="data-cell">{ctn_range_str}</div>', unsafe_allow_html=True)
             mixed_cls = " mixed" if row.get("mixed") else ""
-            with row_cols[4]:
+            with row_cols[3]:
                 st.markdown(
                     f'<div class="data-cell{mixed_cls}">{row.get("color") or default_color}</div>',
                     unsafe_allow_html=True
                 )
-            with row_cols[5]:
+            with row_cols[4]:
                 st.markdown(
                     f'<div class="data-cell">{row.get("upc") or "MIXED"}</div>',
                     unsafe_allow_html=True
                 )
-            with row_cols[6 + n_sizes]:
+            with row_cols[5 + n_sizes]:
                 st.markdown(f'<div class="data-cell"><b>{size_sum}</b></div>', unsafe_allow_html=True)
-            with row_cols[8 + n_sizes]:
+            with row_cols[7 + n_sizes]:
                 st.markdown(f'<div class="data-cell"><b>{tot_pcs}</b></div>', unsafe_allow_html=True)
-            with row_cols[9 + n_sizes]:
+            with row_cols[8 + n_sizes]:
                 st.markdown(f'<div class="data-cell">{grs:.2f}</div>', unsafe_allow_html=True)
-            with row_cols[10 + n_sizes]:
+            with row_cols[9 + n_sizes]:
                 st.markdown(f'<div class="data-cell">{net:.2f}</div>', unsafe_allow_html=True)
-            with row_cols[11 + n_sizes]:
+            with row_cols[10 + n_sizes]:
                 st.markdown(f'<div class="data-cell">{total_ctn_val * grs:.2f}</div>', unsafe_allow_html=True)
-            with row_cols[12 + n_sizes]:
+            with row_cols[11 + n_sizes]:
                 st.markdown(f'<div class="data-cell">{total_ctn_val * net:.2f}</div>', unsafe_allow_html=True)
 
         total_ctn = sum(edited_total_ctn) if edited_total_ctn else 0
@@ -2840,31 +2880,29 @@ def render_packing_list_preview(line, sublines):
             with total_cols[0]:
                 st.markdown('<div class="total-action-cell"></div>', unsafe_allow_html=True)
             with total_cols[1]:
-                st.markdown('<div class="total-action-cell">TOTAL</div>', unsafe_allow_html=True)
+                st.markdown('<div class="total-cell"><b>TOTAL</b></div>', unsafe_allow_html=True)
             with total_cols[2]:
                 st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
             with total_cols[3]:
                 st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
             with total_cols[4]:
                 st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
-            with total_cols[5]:
-                st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
             for s_idx, sz in enumerate(full_sizes):
-                with total_cols[6 + s_idx]:
+                with total_cols[5 + s_idx]:
                     st.markdown(f'<div class="total-cell">{size_packet_totals.get(sz, 0)}</div>', unsafe_allow_html=True)
-            with total_cols[6 + n_sizes]:
+            with total_cols[5 + n_sizes]:
                 st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
-            with total_cols[7 + n_sizes]:
+            with total_cols[6 + n_sizes]:
                 st.markdown(f'<div class="total-cell">{total_ctn}</div>', unsafe_allow_html=True)
-            with total_cols[8 + n_sizes]:
+            with total_cols[7 + n_sizes]:
                 st.markdown(f'<div class="total-cell">{total_pcs}</div>', unsafe_allow_html=True)
+            with total_cols[8 + n_sizes]:
+                st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
             with total_cols[9 + n_sizes]:
                 st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
             with total_cols[10 + n_sizes]:
-                st.markdown('<div class="total-cell"></div>', unsafe_allow_html=True)
-            with total_cols[11 + n_sizes]:
                 st.markdown(f'<div class="total-cell">{total_grs:.2f}</div>', unsafe_allow_html=True)
-            with total_cols[12 + n_sizes]:
+            with total_cols[11 + n_sizes]:
                 st.markdown(f'<div class="total-cell">{total_net:.2f}</div>', unsafe_allow_html=True)
 
         # REMAIN
@@ -2880,37 +2918,46 @@ def render_packing_list_preview(line, sublines):
             with remain_cols[0]:
                 st.markdown('<div class="remain-action-cell"></div>', unsafe_allow_html=True)
             with remain_cols[1]:
-                st.markdown('<div class="remain-action-cell">REMAIN</div>', unsafe_allow_html=True)
+                st.markdown('<div class="remain-cell"><b>REMAIN</b></div>', unsafe_allow_html=True)
             with remain_cols[2]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[3]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[4]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
-            with remain_cols[5]:
-                st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             for s_idx, sz in enumerate(full_sizes):
-                with remain_cols[6 + s_idx]:
+                with remain_cols[5 + s_idx]:
                     st.markdown(
                         f'<div class="remain-cell">{_remain_by_size.get(sz, 0)}</div>',
                         unsafe_allow_html=True,
                     )
+            with remain_cols[5 + n_sizes]:
+                st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[6 + n_sizes]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[7 + n_sizes]:
-                st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
-            with remain_cols[8 + n_sizes]:
                 st.markdown(f'<div class="remain-cell">{_remain_total}</div>', unsafe_allow_html=True)
+            with remain_cols[8 + n_sizes]:
+                st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[9 + n_sizes]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[10 + n_sizes]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
             with remain_cols[11 + n_sizes]:
                 st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
-            with remain_cols[12 + n_sizes]:
-                st.markdown('<div class="remain-cell"></div>', unsafe_allow_html=True)
 
     st.session_state[rows_key] = carton_rows
+
+    _b1, _b2, _b3 = st.columns([1.2, 1.6, 5])
+    with _b1:
+        st.button("＋ Add row", key=f"add_row_v8_{style_key}", on_click=_set_state,
+                  args=(insert_key, len(carton_rows) - 1), help="Add a new carton row at the bottom of the table")
+    with _b2:
+        st.button(f"🗑 Remove ticked rows ({len(ticked_ids)})", key=f"rm_ticked_v8_{style_key}",
+                  disabled=not ticked_ids, on_click=_vf_remove_ticked, args=(style_key, rows_key, defaults_key))
+    if ticked_ids:
+        with _b3:
+            st.caption(f"{len(ticked_ids)} row(s) ticked. They stay in the totals until you press “Remove ticked rows”.")
 
     if pack_mode == "solid_no_leftover":
         _order_qty_total = sum(s["qty"] for s in sublines)
@@ -2918,7 +2965,7 @@ def render_packing_list_preview(line, sublines):
         if _omitted > 0:
             st.warning(
                 f"⚠️ {_omitted} pcs omitted in 'Solid, no leftover' mode. "
-                f"Add rows manually with the ＋ button if you need to include them."
+                f"Add rows manually with the “＋ Add row” button if you need to include them."
             )
 
     st.markdown("**Live totals**")
@@ -3188,11 +3235,8 @@ def render_packing_list_preview(line, sublines):
 st.set_page_config(page_title="PO -> Packing List", layout="wide")
 inject_ui_theme()
 st.title("PO to Packing List Converter")
-st.write(
-    "Upload a VF/Vans-style Purchase Order PDF. This extracts the line items "
-    "and sizes, then builds a packing-list-style Excel workbook (one sheet per "
-    "PO line) with live formulas for cartons, weights, and totals."
-)
+st.caption("Upload a VF/Vans Purchase Order PDF. Pick a PO line, edit its carton table, then download the Excel "
+           "(one sheet per PO line, with live formulas for cartons, weights and totals).")
 
 uploaded_file = st.file_uploader("Upload PO PDF", type=["pdf"])
 
@@ -3211,8 +3255,6 @@ if uploaded_file is not None:
         )
         st.stop()
 
-    st.success(f"Found {len(data['lines'])} PO line(s) and {len(data['sublines'])} size/color subline(s).")
-
     _upload_sig = f"{uploaded_file.name}::{uploaded_file.size}"
     if st.session_state.get("_last_upload_sig") != _upload_sig:
         for _k in list(st.session_state.keys()):
@@ -3221,15 +3263,23 @@ if uploaded_file is not None:
                               "pack_mode_v1_",
                               "xlsx_bytes_v8_", "pdf_bytes_v8_",
                               "xlsx_ts_v8_", "pdf_ts_v8_",
-                              "insert_after_v8_", "delete_row_v8_")):
+                              "insert_after_v8_", "delete_row_v8_",
+                              "vf_full_xlsx", "vf_single_xlsx")):
                 st.session_state.pop(_k, None)
         st.session_state.pop("po_lines_table", None)
         st.session_state.pop("preview_style", None)
         st.session_state.pop("_sidebar_opened_for_style", None)
         st.session_state["_last_upload_sig"] = _upload_sig
 
-    st.subheader("PO Lines")
-    st.caption("Click a row to filter the sublines below and download just that line's sheet.")
+    # ---- 1 summary
+    kit.step(1, "PO summary")
+    _tot_qty = sum(int(l.get("order_qty") or 0) for l in data["lines"])
+    kit.summary_cards([("PO lines", f"{len(data['lines'])}"),
+                       ("Size / colour sublines", f"{len(data['sublines'])}"),
+                       ("Order qty", f"{_tot_qty:,}")])
+
+    # ---- 2 choose a PO line
+    kit.step(2, "Choose a PO line", "Click a row. Its sublines and its editable carton table appear below.")
     po_line_rows = [
         {
             "PO Line No.": l["po_line_no"],
@@ -3245,7 +3295,7 @@ if uploaded_file is not None:
     ]
     selection = st.dataframe(
         po_line_rows,
-        use_container_width=True,
+        **kit.STRETCH,
         on_select="rerun",
         selection_mode="single-row",
         key="po_lines_table",
@@ -3257,37 +3307,45 @@ if uploaded_file is not None:
         selected_idx = rows_selected[0]
         selected_line = data["lines"][selected_idx]
         st.info(f"Selected: **{selected_line['style']}** (PO Line {selected_line['po_line_no']})")
+        st.session_state["preview_style"] = selected_line["style"]       # show the carton table straight away
 
-    st.subheader("Sublines (size / color / UPC)")
-    if selected_idx is not None:
-        filtered_sublines = [s for s in data["sublines"] if s["style"] == selected_line["style"]]
-        st.dataframe(filtered_sublines, use_container_width=True)
+    with st.expander("Sublines (size / colour / UPC)", expanded=False):
+        if selected_idx is not None:
+            filtered_sublines = [s for s in data["sublines"] if s["style"] == selected_line["style"]]
+            st.dataframe(filtered_sublines, **kit.STRETCH)
+        else:
+            st.dataframe(data["sublines"], **kit.STRETCH)
+
+    # ---- 3 carton table (VF editable grid)
+    if selected_idx is not None and st.session_state.get("preview_style") == selected_line["style"]:
+        kit.step(3, f"Carton table — {selected_line['style']}",
+                 "Edit cells, add or delete carton rows in the grid. Quantities per size are in the sidebar and "
+                 "update live.")
+        preview_sublines = [s for s in data["sublines"] if s["style"] == selected_line["style"]]
+        # Placeholder lives in the sidebar OUTSIDE the fragment; the fragment
+        # writes into it (st.sidebar can't be called inside st.fragment).
+        with st.sidebar:
+            st.session_state["_sb_qty_placeholder"] = st.empty()
+        render_packing_list_preview(selected_line, preview_sublines)
     else:
-        st.dataframe(data["sublines"], use_container_width=True)
+        kit.step(3, "Carton table")
+        st.caption("Select a PO line above to see and edit its carton table.")
 
-    st.download_button(
-        label="⬇ Download extracted JSON",
-        data=json.dumps(data, indent=2).encode("utf-8"),
-        file_name=f"po_extracted_{len(data['lines'])}_lines.json",
-        mime="application/json",
-        key="dl_po_json",
-    )
-
-    col1, col2 = st.columns(2)
+    # ---- 4 download
+    kit.step(4, "Download", "Yellow cells in the file (CUT QTY, CTN MEAS, CBM factor) come from your factory records, "
+                            "not the PO. Carton numbers, ship qty and weights are calculated.")
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Build full workbook (all PO lines)", type="primary"):
             with st.spinner("Building Excel workbook..."):
                 wb = build_workbook(data)
                 buf = io.BytesIO()
                 wb.save(buf)
-                buf.seek(0)
-            st.success(f"Workbook built with {len(wb.sheetnames)} sheet(s): {', '.join(wb.sheetnames)}")
-            st.download_button(
-                label="Download packing_list_all_PO_lines.xlsx",
-                data=buf,
-                file_name="packing_list_all_PO_lines.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            st.session_state["vf_full_xlsx"] = (buf.getvalue(), ", ".join(wb.sheetnames))
+        if st.session_state.get("vf_full_xlsx"):
+            _b, _names = st.session_state["vf_full_xlsx"]
+            st.success(f"Workbook ready: {_names}")
+            kit.download_block("⬇ Download all PO lines (Excel)", _b, "packing_list_all_PO_lines.xlsx")
     with col2:
         if selected_idx is not None:
             if st.button(f"Build sheet for {selected_line['style']} only"):
@@ -3299,32 +3357,19 @@ if uploaded_file is not None:
                     wb = build_workbook(single_line_data)
                     buf = io.BytesIO()
                     wb.save(buf)
-                    buf.seek(0)
-                st.success(f"Sheet built for {selected_line['style']}")
-                st.download_button(
-                    label=f"Download {selected_line['style']}.xlsx",
-                    data=buf,
-                    file_name=f"packing_list_{selected_line['style']}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-                st.session_state["preview_style"] = selected_line["style"]
+                st.session_state["vf_single_xlsx"] = (selected_line["style"], buf.getvalue())
+            _single = st.session_state.get("vf_single_xlsx")
+            if _single and _single[0] == selected_line["style"]:
+                kit.download_block(f"⬇ Download {_single[0]} (Excel)", _single[1], f"packing_list_{_single[0]}.xlsx")
         else:
             st.caption("Select a PO line above to download just that sheet.")
-
-    if selected_idx is not None and st.session_state.get("preview_style") == selected_line["style"]:
-        st.subheader(f"Packing List Preview — {selected_line['style']}")
-        preview_sublines = [s for s in data["sublines"] if s["style"] == selected_line["style"]]
-        # Placeholder lives in the sidebar OUTSIDE the fragment; the fragment
-        # writes into it (st.sidebar can't be called inside st.fragment).
-        with st.sidebar:
-            st.session_state["_sb_qty_placeholder"] = st.empty()
-        render_packing_list_preview(selected_line, preview_sublines)
-
-    st.info(
-        "Yellow cells in the downloaded file still need manual entry: "
-        "CUT QTY, CTN MEAS, and CBM factor - these come from your factory's "
-        "cutting/packing records, not the PO. "
-        "CARTON NO., SHIP QTY, GROSS/NET WEIGHT are auto-calculated."
-    )
+    with col3:
+        st.download_button(
+            label="⬇ Download extracted JSON",
+            data=json.dumps(data, indent=2).encode("utf-8"),
+            file_name=f"po_extracted_{len(data['lines'])}_lines.json",
+            mime="application/json",
+            key="dl_po_json",
+        )
 else:
     st.info("Upload a PDF to get started.")

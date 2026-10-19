@@ -14,8 +14,16 @@ import io
 import re
 from collections import OrderedDict
 
+import sys
+from pathlib import Path
+
 import pdfplumber
 import streamlit as st
+
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:                      # pl_kit.py lives in the project root
+    sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter as L
@@ -418,36 +426,40 @@ def _group_ui(head, g, key):
         sizes = sizes[:MAX_SIZES]
     order = g["order"]
 
-    with st.expander("Packing settings (not in the PO - edit if different)", expanded=False):
-        st.caption("Pieces per full carton, net weight per piece (kg) and cut qty, per size.")
-        cols = st.columns(min(len(sizes), 10))
-        pack, netwt, cut = {}, {}, {}
-        for i, s in enumerate(sizes):
-            with cols[i % len(cols)]:
-                st.markdown(f"**{s}**")
-                pack[s] = st.number_input("Pcs / carton", 1, 500,
-                                          PACK_DEFAULT.get(s, DEFAULT_PACK), 1,
-                                          key=f"{key}_pk_{s}")
-                netwt[s] = st.number_input("Net kg / pc", 0.0, 5.0,
-                                           NETWT_DEFAULT.get(s, DEFAULT_NETWT), 0.001,
-                                           format="%.3f", key=f"{key}_nw_{s}")
-                cut[s] = st.number_input("Cut qty", 0, 1000000, 0, 1, key=f"{key}_cut_{s}")
+    # ---- 1 summary
+    kit.step(1, "PO summary")
+    kit.summary_cards([("Style", g["style"]), ("Color", f"{g['color']}"),
+                       ("Order pcs", f"{sum(order.get(s, 0) for s in sizes):,}"),
+                       ("Sizes", f"{len(sizes)}"),
+                       ("Tolerance", f"+{head['over_tol']}% / -{head['under_tol']}%")])
+    st.caption(f"{g.get('style_desc', '')} · {g.get('cdesc', '')} · {g.get('goods', '')}")
 
+    # ---- 2 variables
+    kit.step(2, "Packing settings", "Not in the PO. Pieces per full carton, net weight per piece (kg) and cut qty, per size.")
+    cols = st.columns(min(len(sizes), 10))
+    pack, netwt, cut = {}, {}, {}
+    for i, s in enumerate(sizes):
+        with cols[i % len(cols)]:
+            st.markdown(f"**{s}**")
+            pack[s] = st.number_input("Pcs / carton", 1, 500, PACK_DEFAULT.get(s, DEFAULT_PACK), 1, key=f"{key}_pk_{s}")
+            netwt[s] = st.number_input("Net kg / pc", 0.0, 5.0, NETWT_DEFAULT.get(s, DEFAULT_NETWT), 0.001,
+                                       format="%.3f", key=f"{key}_nw_{s}")
+            cut[s] = st.number_input("Cut qty", 0, 1000000, 0, 1, key=f"{key}_cut_{s}")
+
+    # ---- 3 carton table
+    kit.step(3, "Carton table",
+             "Edit any cell, add a row with +, or tick 🗑 Delete and press “Remove ticked rows”. "
+             "Changing “Pcs / carton” above rebuilds this table.")
     sig = "_".join(str(pack[s]) for s in sizes)
     base = default_rows(sizes, order, pack)
-    df0 = pd.DataFrame(
-        [{"Kind": r["Kind"], "Carton": r["Carton"],
-          **{s: r["sizes"].get(s, 0) for s in sizes},
-          "CTN QTY": r["CTN QTY"]} for r in base])
-    st.markdown("##### Carton table (editable - add / delete rows)")
+    df0 = pd.DataFrame([{"Kind": r["Kind"], "Carton": r["Carton"],
+                         **{s: r["sizes"].get(s, 0) for s in sizes}, "CTN QTY": r["CTN QTY"]} for r in base])
     cfg = {"Kind": st.column_config.SelectboxColumn("Kind", options=["Full", "Partial"], required=True),
-           "Carton": st.column_config.SelectboxColumn("Carton", options=["Auto"] + list(CARTONS.keys()),
-                                                      required=True),
+           "Carton": st.column_config.SelectboxColumn("Carton", options=["Auto"] + list(CARTONS.keys()), required=True),
            "CTN QTY": st.column_config.NumberColumn("CTN QTY", min_value=0, step=1)}
     for s in sizes:
         cfg[s] = st.column_config.NumberColumn(s, min_value=0, step=1)
-    edited = st.data_editor(df0, column_config=cfg, num_rows="dynamic", use_container_width=True,
-                            hide_index=True, key=f"{key}_ed_{sig}")
+    edited = kit.editable_grid(df0, f"{key}_ed_{sig}", column_config=cfg)
 
     rows = []
     for _, r in edited.iterrows():
@@ -459,34 +471,17 @@ def _group_ui(head, g, key):
     calc = calc_rows(rows, sizes, netwt)
     ship = ship_by_size(calc, sizes)
 
+    # ---- 4 check
+    kit.step(4, "Check against the PO")
     tot_ctn = sum(r["ctn"] for r in calc)
     tot_pcs = sum(ship.values())
-    order_total = sum(order.get(s, 0) for s in sizes)
     gw = sum(r["gw"] * r["ctn"] for r in calc)
     nw = sum((r["gw"] - r["empty"]) * r["ctn"] for r in calc)
-    m = st.columns(5)
-    m[0].metric("Cartons", tot_ctn)
-    m[1].metric("Ship pcs", tot_pcs)
-    m[2].metric("Order pcs", order_total)
-    m[3].metric("Gross wt kg", f"{gw:,.2f}")
-    m[4].metric("Net wt kg", f"{nw:,.2f}")
-
-    over, under = float(head["over_tol"]), float(head["under_tol"])
-    table = []
-    for s in sizes:
-        o = order.get(s, 0)
-        d = ship[s] - o
-        pct = d / o * 100 if o else 0.0
-        ok = (-under <= pct <= over)
-        table.append({"Size": s, "Order": o, "Ship": ship[s],
-                      "Excess/Short": d, "%": round(pct, 2),
-                      "Tolerance": "OK" if ok else "OUT"})
-    st.dataframe(table, use_container_width=True, hide_index=True)
-    bad = [t["Size"] for t in table if t["Tolerance"] == "OUT"]
-    if bad:
-        st.warning(f"Outside tolerance (+{over:g}% / -{under:g}%): {', '.join(bad)}")
-    else:
-        st.success(f"All sizes within tolerance (+{over:g}% / -{under:g}%).")
+    kit.summary_cards([("Cartons", f"{tot_ctn:,}"), ("Ship pcs", f"{tot_pcs:,}"),
+                       ("Order pcs", f"{sum(order.get(s, 0) for s in sizes):,}"),
+                       ("Gross kg", f"{gw:,.1f}"), ("Net kg", f"{nw:,.1f}")])
+    kit.check_by_size(sizes, {s: order.get(s, 0) for s in sizes}, ship,
+                      over_pct=float(head["over_tol"]), under_pct=float(head["under_tol"]))
 
     g2 = dict(g, sizes=sizes)
     return {"group": g2, "calc": calc, "cut": cut}
@@ -507,7 +502,7 @@ def run(pdf_file=None):
         return
 
     st.success(f"PO {head['po']} - brand {head['brand']} - {len(groups)} style/colour group(s) - "
-               f"CRD {head['crd_text']} - tolerance +{head['over_tol']}% / -{head['under_tol']}%")
+               f"CRD {head['crd_text']}")
     if head["dest"]:
         st.caption("Ship to: " + " | ".join(head["dest"]))
 
@@ -521,15 +516,12 @@ def run(pdf_file=None):
             with tab:
                 results.append(_group_ui(head, g, f"kt_{head['po']}_{g['style']}_{g['color']}"))
 
+    kit.step(5, "Download", "One Excel file with a sheet for every style / colour.")
     wb = build_workbook(head, results)
     buf = io.BytesIO()
     wb.save(buf)
-    st.download_button("Download packing list (.xlsx)", buf.getvalue(),
-                       file_name=f"packing_list_{head['po']}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       type="primary", key=f"kt_dl_{head['po']}")
-    st.info("Cut qty and carton weights are not in the PO - they use the values in "
-            "'Packing settings' above.")
+    kit.download_block("⬇ Download packing list (Excel)", buf.getvalue(), f"packing_list_{head['po']}.xlsx",
+                       "Cut qty and carton weights are not in the PO - they use the values in 'Packing settings'.")
 
 
 if __name__ == "__main__":

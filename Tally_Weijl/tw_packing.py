@@ -266,6 +266,36 @@ def build_carton_plan(
     return rows
 
 
+def with_ship_qty(po: PoData, ship: dict[str, int]) -> PoData:
+    """Copy of the PO whose line quantities are the quantities the user wants to ship (for planning only)."""
+    import dataclasses
+    lines = [dataclasses.replace(ln, qty=int(ship.get(ln.size, ln.qty))) for ln in po.lines]
+    return dataclasses.replace(po, lines=lines)
+
+
+def plan_from_rows(po: PoData, rows: list[dict]) -> tuple[list[CartonRow], list[str]]:
+    """User-edited carton table -> carton plan.
+    rows keys: size, ctns, pcs, L, W, H, small (bool). Invalid rows are skipped and reported."""
+    out, problems = [], []
+    for n, r in enumerate(rows, 1):
+        size = r.get("size")
+        try:
+            ctns, pcs = int(float(r.get("ctns"))), int(float(r.get("pcs")))
+            L, W, H = (float(r.get(k)) for k in ("L", "W", "H"))
+        except (TypeError, ValueError):
+            if size:
+                problems.append(f"Row {n}: cartons, pcs and size must be numbers - row ignored.")
+            continue
+        if size not in po.sizes:
+            problems.append(f"Row {n}: pick a size from the list - row ignored.")
+            continue
+        if ctns <= 0 or pcs <= 0 or min(L, W, H) <= 0:
+            problems.append(f"Row {n}: cartons, pcs per carton and measurements must be above 0 - row ignored.")
+            continue
+        out.append(CartonRow(size, ctns, pcs, ctns * pcs, L, W, H, bool(r.get("small"))))
+    return out, problems
+
+
 # --------------------------------------------------------------------------- Excel
 def _style_header_row(ws, row: int, cols: int):
     for c in range(1, cols + 1):

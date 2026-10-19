@@ -493,6 +493,12 @@ from datetime import date
 
 import openpyxl
 import pandas as pd
+import sys as _sys
+from pathlib import Path as _Path
+_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _ROOT not in _sys.path:                     # pl_kit.py lives in the project root
+    _sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, Side
@@ -626,6 +632,32 @@ def build_plan(item, pack, gross, tare, full_dims, part_dims):
             })
             cno += 1
     return rows
+
+
+def rows_from_edit(recs, item):
+    """Edited carton table -> carton rows (numbered). recs keys: size, ctn, pcs, L, W, H, gross, net."""
+    rows, problems, cno = [], [], 1
+    for n, r in enumerate(recs, 1):
+        sz = r.get("size")
+        try:
+            ctn, pcs = int(float(r.get("ctn"))), int(float(r.get("pcs")))
+            L, W, H = (float(r.get(k)) for k in ("L", "W", "H"))
+            gross, net = float(r.get("gross")), float(r.get("net"))
+        except (TypeError, ValueError):
+            if sz:
+                problems.append(f"Row {n}: cartons, pieces, size and weights must be numbers - row ignored.")
+            continue
+        if sz not in item["sizes"]:
+            problems.append(f"Row {n}: pick a size from the list - row ignored.")
+            continue
+        if ctn <= 0 or pcs <= 0 or min(L, W, H) <= 0:
+            problems.append(f"Row {n}: cartons, pieces and measurements must be above 0 - row ignored.")
+            continue
+        rows.append({"from": cno, "to": cno + ctn - 1, "size": sz, "n_ctn": ctn, "pcs_per_ctn": pcs,
+                     "L": L, "W": W, "H": H, "m3_per_ctn": L * W * H / 1_000_000.0,
+                     "gross_per_ctn": gross, "net_per_ctn": net})
+        cno += ctn
+    return rows, problems
 
 
 # ============================================================
@@ -805,7 +837,7 @@ def build_workbook(head, item, rows):
 # ============================================================
 def _render_order_table(item):
     """Compact Order Qty table: sizes as columns, single QTY row."""
-    st.markdown("##### Order Quantity")
+    st.markdown("**Order quantity**")
 
     sizes_ord = list(item["sizes"].keys())
     header_row = ["QTY"] + [item["sizes"][sz] for sz in sizes_ord] + \
@@ -975,14 +1007,17 @@ def _parse_cached(b: bytes):
 
 
 def _item_ui(item, key):
-    st.markdown(f"#### {item['item']} — {item['desc']}")
     tot = sum(item["sizes"].values())
-    st.caption(f"Contract {item.get('contract') or '?'}  ·  {tot:,} pcs  ·  "
-               f"{len(item['sizes'])} sizes")
+    kit.step(1, f"Item {item['item']}")
+    kit.summary_cards([("Item", str(item["item"])), ("Contract", str(item.get("contract") or "?")),
+                       ("Sizes", f"{len(item['sizes'])}"), ("Pieces", f"{tot:,}")])
+    st.caption(str(item["desc"]))
+    _render_order_table(item)
 
     sizes = list(item["sizes"].keys())
 
-    with st.expander("Packing configuration", expanded=False):
+    kit.step(2, "Variables", "Pieces per carton, weights, carton sizes and header texts.")
+    with st.expander("Packing configuration", expanded=True):
         cols = st.columns(min(len(sizes), 6))
         pack, gross, tare = {}, {}, {}
         for i, sz in enumerate(sizes):
@@ -1047,35 +1082,47 @@ def _item_ui(item, key):
         "pack_of":          pack_of.strip() or None,
     }
 
-    # ---- 1) HEADER BLOCK ----
-    _render_header_block(head, item, rows)
-    st.markdown("---")
-
-    # ---- 2) ORDER QTY TABLE (BEFORE the main carton detail) ----
-    _render_order_table(item)
-    st.markdown("---")
-
-    # ---- 3) CARTON DETAIL TABLE ----
+    # ---- 3 carton table (editable)
+    kit.step(3, "Carton table",
+             "Made from the settings above. Edit any cell, add a row with +, or tick 🗑 Delete and press "
+             "“Remove ticked rows”. Changing the settings above rebuilds this table.")
+    import hashlib
+    sig = hashlib.md5(repr((sorted(pack.items()), sorted(gross.items()), sorted(tare.items()),
+                            (fL, fW, fH), (pL, pW, pH))).encode()).hexdigest()[:10]
+    base = pd.DataFrame([{"Size": r["size"], "Ctns": r["n_ctn"], "Pcs/Ctn": r["pcs_per_ctn"], "L (cm)": r["L"],
+                          "W (cm)": r["W"], "H (cm)": r["H"], "Gross/Ctn": r["gross_per_ctn"],
+                          "Net/Ctn": r["net_per_ctn"]} for r in rows])
+    cfg = {"Size": st.column_config.SelectboxColumn("Size", options=sizes, required=True),
+           "Ctns": st.column_config.NumberColumn("Ctns", min_value=1, step=1, format="%d"),
+           "Pcs/Ctn": st.column_config.NumberColumn("Pcs/Ctn", min_value=1, step=1, format="%d"),
+           "L (cm)": st.column_config.NumberColumn(min_value=1.0, step=1.0),
+           "W (cm)": st.column_config.NumberColumn(min_value=1.0, step=1.0),
+           "H (cm)": st.column_config.NumberColumn(min_value=1.0, step=1.0),
+           "Gross/Ctn": st.column_config.NumberColumn(min_value=0.0, step=0.1, format="%.2f"),
+           "Net/Ctn": st.column_config.NumberColumn(min_value=0.0, step=0.1, format="%.2f")}
+    ed = kit.editable_grid(base, f"{key}_ct_{sig}", column_config=cfg)
+    recs = [{"size": r["Size"], "ctn": r["Ctns"], "pcs": r["Pcs/Ctn"], "L": r["L (cm)"], "W": r["W (cm)"],
+             "H": r["H (cm)"], "gross": r["Gross/Ctn"], "net": r["Net/Ctn"]} for r in ed.to_dict("records")]
+    rows, probs = rows_from_edit(recs, item)
+    kit.problems(probs)
+    if not rows:
+        st.error("The carton table is empty. Press “Reset table to PO” or add a row.")
+        return head, item, []
     _render_carton_table(item, rows)
 
-    # ---- 4) METRICS ----
+    # ---- 4 check
+    kit.step(4, "Check against the PO")
+    packed = {sz: sum(r["n_ctn"] * r["pcs_per_ctn"] for r in rows if r["size"] == sz) for sz in sizes}
+    kit.check_by_size(sizes, dict(item["sizes"]), packed)
     tot_ctn = sum(r["n_ctn"] for r in rows)
     tot_pcs = sum(r["n_ctn"] * r["pcs_per_ctn"] for r in rows)
     tot_m3  = sum(r["n_ctn"] * r["m3_per_ctn"]   for r in rows)
     tot_gw  = sum(r["n_ctn"] * r["gross_per_ctn"] for r in rows)
     tot_nw  = sum(r["n_ctn"] * r["net_per_ctn"]  for r in rows)
-    m = st.columns(5)
-    m[0].metric("Cartons", tot_ctn)
-    m[1].metric("Pieces",  f"{tot_pcs:,}")
-    m[2].metric("m³",      f"{tot_m3:.4f}")
-    m[3].metric("Gross kg", f"{tot_gw:.2f}")
-    m[4].metric("Net kg",   f"{tot_nw:.2f}")
-
-    if tot_pcs != tot:
-        st.warning(f"Packed {tot_pcs:,} vs PO {tot:,} pcs (diff {tot_pcs - tot:+d})")
-
-    # ---- 5) SIZE SUMMARY TABLE (below) ----
-    _render_size_summary(item, rows)
+    kit.summary_cards([("Cartons", f"{tot_ctn:,}"), ("Pieces", f"{tot_pcs:,}"), ("m³", f"{tot_m3:.3f}"),
+                       ("Gross kg", f"{tot_gw:,.1f}"), ("Net kg", f"{tot_nw:,.1f}")])
+    with st.expander("Size summary"):
+        _render_size_summary(item, rows)
 
     return head, item, rows
 
@@ -1111,12 +1158,10 @@ def run(xlsx_file=None):
         ws = combined.create_sheet(title=sheet_name)
         fill_sheet(ws, head, item, rows)
 
+    kit.step(5, "Download", "One Excel file with a sheet for every item.")
     buf = io.BytesIO(); combined.save(buf)
-    st.download_button(
-        "Download packing list (.xlsx)", buf.getvalue(),
-        file_name=f"packing_list_{items[0].get('contract','contract')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary", key="nx_dl")
+    kit.download_block("⬇ Download packing list (Excel)", buf.getvalue(),
+                       f"packing_list_{items[0].get('contract','contract')}.xlsx")
 
 
 if __name__ == "__main__":

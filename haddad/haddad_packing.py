@@ -208,6 +208,73 @@ def compute(lines: pd.DataFrame, sizes: list[str], excess: dict, override: dict,
     return Result(ref, sizes, rows, summary, tare, dims, restart, warns)
 
 
+def compute_rows(lines: pd.DataFrame, sizes: list[str], rows_in: list[dict], wt: dict, tare: float,
+                 restart: bool = False) -> tuple[Result, list[str]]:
+    """Carton table edited by the user -> Result.
+    rows_in keys: po, ctns, pcs (dict size->pcs per carton), dims (L, W, H inches), order (int or None).
+    Style / label / ref / colour come from the status-sheet line of the chosen PO#."""
+    meta = {r["PO#"]: r for _, r in lines.iterrows()}
+    rows, problems = [], []
+    nxt = 1
+    for n, r in enumerate(rows_in, 1):
+        po = r.get("po")
+        if po not in meta:
+            if po:
+                problems.append(f"Row {n}: pick a PO# from the list - row ignored.")
+            continue
+        try:
+            ctns = int(float(r.get("ctns")))
+            dims = tuple(float(x) for x in r.get("dims"))
+        except (TypeError, ValueError):
+            problems.append(f"Row {n} (PO {po}): cartons and carton size must be numbers - row ignored.")
+            continue
+        pcs = {}
+        for sz, q in (r.get("pcs") or {}).items():
+            try:
+                q = int(float(q))
+            except (TypeError, ValueError):
+                q = 0
+            if q > 0:
+                pcs[sz] = q
+        if ctns <= 0 or not pcs or min(dims) <= 0:
+            problems.append(f"Row {n} (PO {po}): cartons, pieces and carton size must be above 0 - row ignored.")
+            continue
+        src = meta[po]
+        ppk = sum(pcs.values())
+        ship = ctns * ppk
+        try:
+            order = int(round(float(r.get("order")))) if r.get("order") not in (None, "") and float(r.get("order")) > 0 else ship
+        except (TypeError, ValueError):
+            order = ship
+        short = ship - order
+        net_kg = sum(q * float(wt.get(sz, 0.0)) for sz, q in pcs.items())
+        c_from = 1 if restart else nxt
+        c_to = c_from + ctns - 1
+        nxt = c_to + 1
+        rows.append({
+            "po": po, "style": src["Style"], "label": src["Label"], "ref": src["Ref#"],
+            "color": f"{src['Fashion Color']} - {src['Color']}".strip(" -"),
+            "ctns": ctns, "order": order, "ship": ship, "short": short,
+            "short_pct": (short / order) if order else 0.0,
+            "pcs": pcs, "ppk": ppk, "net_kg": net_kg, "gross_kg": net_kg + tare,
+            "c_from": c_from, "c_to": c_to, "dims": dims,
+            "cbm": ctns * dims[0] * dims[1] * dims[2] * 2.54 ** 3 / 1_000_000,
+        })
+    tot_order = sum(x["order"] for x in rows)
+    tot_ship = sum(x["ship"] for x in rows)
+    gk = sum(x["gross_kg"] * x["ctns"] for x in rows)
+    nk = sum(x["net_kg"] * x["ctns"] for x in rows)
+    summary = {
+        "total_order": tot_order, "total_ship": tot_ship, "excess_qty": tot_ship - tot_order,
+        "excess_pct": (tot_ship - tot_order) / tot_order if tot_order else 0.0,
+        "ctns": sum(x["ctns"] for x in rows), "gross_kg": gk, "gross_lbs": gk * LBS,
+        "net_kg": nk, "net_lbs": nk * LBS, "cbm": sum(x["cbm"] for x in rows),
+    }
+    ref = rows[0]["ref"] if rows else ""
+    dims0 = rows[0]["dims"] if rows else DEF_DIMS
+    return Result(ref, sizes, rows, summary, tare, dims0, restart, []), problems
+
+
 def main_df(res: Result) -> pd.DataFrame:
     """Preview of the main table (same columns / order as the Excel sheet)."""
     out = []

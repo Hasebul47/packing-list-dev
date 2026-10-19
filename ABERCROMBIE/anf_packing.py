@@ -51,7 +51,7 @@ class PoData:
 
 _LINE = re.compile(
     r"^(?P<color>.+?)\s+(?P<sku>\d+(?:-\d+){3,})\s+(?P<short>\d+)\s+(?P<ean>\d{10,14})\s+"
-    r"(?:(?P<shade>[A-Za-z0-9]+)\s+)?(?P<ticket>\d+\.\d{2})\s+[A-Z]{3}\s+(?P<cost>\d+\.\d{2})\s+"
+    r"(?:(?P<shade>[A-Za-z0-9]+)\s+)?(?P<ticket>\d+\.\d{2})\s+[A-Z]{2,3}\s+(?P<cost>\d+\.\d{2})\s+"
     r"(?P<size>.+?)\s+(?P<qty>\d+)\s*$")
 
 
@@ -106,11 +106,13 @@ def parse_po(data: bytes) -> PoData:
 
 
 def size_key(label: str):
-    """5/6 SHORT < 5/6 < 5/6 LONG < 7/8 SHORT ...  (matches the S-R-L order of the reference)."""
-    m = re.match(r"(\d+)(?:/(\d+))?\s*(.*)", label)
-    var = {"SHORT": 0, "": 1, "REG": 1, "REGULAR": 1, "LONG": 2}
+    """000 < 00 < 0 < 2 < 4 ...; inside a number S < R < L (also SHORT < REG < LONG)."""
+    m = re.match(r"(\d+)(?:/(\d+))?[\s-]*(.*)", label)
+    var = {"SHORT": 0, "S": 0, "": 1, "R": 1, "REG": 1, "REGULAR": 1, "LONG": 2, "L": 2}
     if m:
-        return (0, int(m.group(1)), var.get(m.group(3).strip(), 3), label)
+        n = m.group(1)
+        num = -(len(n) - 1) if int(n) == 0 else int(n)      # 0 / 00 / 000 -> 0 / -1 / -2
+        return (0, num, var.get(m.group(3).strip().upper(), 3), label)
     return (1, 0, 0, label)
 
 
@@ -157,12 +159,19 @@ def make_plan(po: PoData, ship_override: dict | None = None, wt: dict | None = N
                 rows.append({"color": c, "size": s, "qty": std, "ctns": full, "small": False})
             if rem:
                 rows.append({"color": c, "size": s, "qty": rem, "ctns": 1, "small": True})
+    meta = {"buyer": "ABERCROMBIE", "style": style or po.tech_pack, "po": po.po,
+            "description": description or po.po_code, "po_desc": po.description, "ship_date": po.ship_date}
+    return _finalize(rows, meta, sizes, colors, order, ship, wt, tare, std, big, small)
+
+
+def _finalize(rows, meta, sizes, colors, order, ship, wt, tare, std, big, small) -> Plan:
+    """Numbers every carton row and builds the summary. Used by make_plan and by plan_from_rows."""
     nxt = 1
     for r in rows:
         r["from"], r["to"] = nxt, nxt + r["ctns"] - 1
         nxt = r["to"] + 1
         r["pcs"] = r["qty"] * r["ctns"]
-        r["wpp"] = wt[r["size"]]
+        r["wpp"] = wt.get(r["size"], DEF_NET_PER_PC)
         r["net"] = r["wpp"] * r["qty"]
         r["gross"] = r["net"] + tare
     total_ctns = sum(r["ctns"] for r in rows)
@@ -177,9 +186,34 @@ def make_plan(po: PoData, ship_override: dict | None = None, wt: dict | None = N
         "net": sum(r["net"] * r["ctns"] for r in rows),
         "cbm": (n_big * big[0] * big[1] * big[2] + n_small * small[0] * small[1] * small[2]) / 1_000_000,
     }
-    meta = {"buyer": "ABERCROMBIE", "style": style or po.tech_pack, "po": po.po,
-            "description": description or po.po_code, "po_desc": po.description, "ship_date": po.ship_date}
     return Plan(meta, sizes, colors, order, ship, rows, summary, wt, tare, std, tuple(big), tuple(small))
+
+
+def plan_from_rows(plan: Plan, rows_in: list[dict]) -> tuple[Plan, list[str]]:
+    """Rebuild the plan from a user-edited carton table.
+    rows_in keys: color, size, qty (pcs per carton), ctns, small (bool).  Returns (plan, problems)."""
+    problems, rows = [], []
+    for n, r in enumerate(rows_in, 1):
+        color, size = r.get("color"), r.get("size")
+        try:
+            qty, ctns = int(float(r.get("qty"))), int(float(r.get("ctns")))
+        except (TypeError, ValueError):
+            if color or size:
+                problems.append(f"Row {n}: qty and cartons must be numbers - row ignored.")
+            continue
+        if color not in plan.colors or size not in plan.sizes:
+            problems.append(f"Row {n}: pick a colour and a size from the lists - row ignored.")
+            continue
+        if qty <= 0 or ctns <= 0:
+            problems.append(f"Row {n}: qty and cartons must be above 0 - row ignored.")
+            continue
+        rows.append({"color": color, "size": size, "qty": qty, "ctns": ctns, "small": bool(r.get("small"))})
+    ship = {k: 0 for k in plan.order}
+    for r in rows:
+        ship[(r["color"], r["size"])] = ship.get((r["color"], r["size"]), 0) + r["qty"] * r["ctns"]
+    new = _finalize(rows, plan.meta, plan.sizes, plan.colors, plan.order, ship, plan.wt, plan.tare,
+                    plan.std, plan.big, plan.small)
+    return new, problems
 
 
 def file_stem(plan: Plan) -> str:

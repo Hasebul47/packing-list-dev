@@ -79,10 +79,11 @@ class PoData:
     total_units: int = 0
     lines: list[PoLine] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    order_qty: dict = field(default_factory=dict)   # size -> qty as printed on the PO (never edited)
 
     @property
     def sizes(self) -> list[str]:
-        seen: list[str] = []
+        seen: list[str] = list(self.order_qty)
         for ln in self.lines:
             for s in ln.sizes:
                 if s not in seen:
@@ -91,10 +92,13 @@ class PoData:
 
     @property
     def order_by_size(self) -> dict[str, int]:
+        return {s: int(self.order_qty.get(s, 0)) for s in self.sizes}
+
+    def packed_by_size(self) -> dict[str, int]:
         out = {s: 0 for s in self.sizes}
         for ln in self.lines:
             for s, q in ln.size_qty.items():
-                out[s] += q
+                out[s] = out.get(s, 0) + q
         return out
 
 
@@ -186,6 +190,10 @@ def parse_po(data: bytes) -> PoData:
             delivery=sm.group(2) or po.ship_date,
         ))
 
+    for ln in po.lines:
+        for sz, q in ln.size_qty.items():
+            po.order_qty[sz] = po.order_qty.get(sz, 0) + q
+
     # ---- totals cross-check
     tm = re.search(r"TOTALS\s+([\d,]+)\s+([\d,]+)\s+\$([\d.,]+)", full)
     po.total_ctn = sum(l.ctns for l in po.lines)
@@ -196,6 +204,69 @@ def parse_po(data: bytes) -> PoData:
                 f"PO totals say {tm.group(1)} ctn / {tm.group(2)} pcs but lines add up to "
                 f"{po.total_ctn:,} ctn / {po.total_units:,} pcs - check that no line was missed.")
     return po
+
+
+# ------------------------------------------------------------------ editable table <-> lines
+COL_LABEL, COL_PACK, COL_CTNS = "Label", "Pack", "Ctns"
+COL_L, COL_W, COL_H, COL_NET = "L (cm)", "W (cm)", "H (cm)", "Net kg / pc"
+
+
+def _num(v, default=0.0) -> float:
+    try:
+        f = float(v)
+        return default if f != f else f      # NaN -> default
+    except (TypeError, ValueError):
+        return default
+
+
+def _txt(v) -> str:
+    if v is None or (isinstance(v, float) and v != v):
+        return ""
+    return str(v).strip()
+
+
+def rows_from_po(po: PoData) -> list[dict]:
+    """The editable table the user starts from (one row per PO line)."""
+    sizes = po.sizes
+    out = []
+    for ln in po.lines:
+        r = {COL_LABEL: ln.label, COL_PACK: ln.dim_pk, COL_CTNS: ln.ctns}
+        for s in sizes:
+            r[s] = ln.ratio[ln.sizes.index(s)] if s in ln.sizes else 0
+        r.update({COL_L: DEF_DIM[0], COL_W: DEF_DIM[1], COL_H: DEF_DIM[2], COL_NET: DEF_NET})
+        out.append(r)
+    return out
+
+
+def lines_from_rows(rows: list[dict], sizes: list[str]):
+    """Edited table -> (lines, dims, net_pc, problems). Blank / invalid rows are skipped and reported."""
+    lines, dims, net, problems = [], {}, {}, []
+    for n, r in enumerate(rows, 1):
+        label = _txt(r.get(COL_LABEL))
+        ratio_all = [int(max(0, _num(r.get(s)))) for s in sizes]
+        ctns = int(_num(r.get(COL_CTNS)))
+        if not label and not any(ratio_all) and ctns == 0:
+            continue                                  # empty new row
+        if not label:
+            label = f"NEW{n}"
+        used = [(s, q) for s, q in zip(sizes, ratio_all) if q > 0]
+        if not used:
+            problems.append(f"Row {n} ({label}): no size ratio entered - row ignored.")
+            continue
+        if ctns <= 0:
+            problems.append(f"Row {n} ({label}): cartons must be above 0 - row ignored.")
+            continue
+        pcs = sum(q for _, q in used)
+        lines.append(PoLine(
+            label=label, dim_pk=_txt(r.get(COL_PACK)) or label,
+            kind="SOLID" if len(used) == 1 else "PREPACK",
+            sizes=[s for s, _ in used], ratio=[q for _, q in used],
+            pcs_per_ctn=pcs, ctns=ctns, units=ctns * pcs))
+        i = len(lines) - 1
+        dims[i] = tuple(_num(r.get(c), d) if _num(r.get(c), d) > 0 else d
+                        for c, d in zip((COL_L, COL_W, COL_H), DEF_DIM))
+        net[i] = _num(r.get(COL_NET), DEF_NET)
+    return lines, dims, net, problems
 
 
 # ------------------------------------------------------------------ carton plan

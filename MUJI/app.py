@@ -4,7 +4,15 @@ import io
 import openpyxl
 import pandas as pd
 import streamlit as st
+import sys
+from pathlib import Path
+
 import muji_packing_list as m
+
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:                      # pl_kit.py lives in the project root
+    sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 
 
 def run(xlsx_file=None):
@@ -43,7 +51,12 @@ def run(xlsx_file=None):
          for (d, s, c), g in groups.items()])
     overview["Total ctns"] = overview["Assort ctns"] + overview["Solid ctns"]
 
-    st.subheader("PO contents")
+    kit.step(1, "PO summary")
+    kit.summary_cards([("Styles", f"{overview['Style'].nunique()}"),
+                       ("Destinations", f"{overview['Destination'].nunique()}"),
+                       ("Cartons", f"{int(overview['Total ctns'].sum()):,}"),
+                       ("PO pieces", f"{int(overview['PO qty (pcs)'].sum()):,}")])
+    kit.step(2, "Select what to pack", "Choose the styles and destinations to include in the Excel file.")
     if issues:
         st.warning(f"{len(issues)} data check(s) failed - review before using the packing list.")
         st.write("\n".join(f"- {i}" for i in issues))
@@ -56,7 +69,7 @@ def run(xlsx_file=None):
     sel_s = c1.multiselect("Style", styles, default=styles, key="muji_sel_s")
     sel_d = c2.multiselect("Destination", dests, default=dests, key="muji_sel_d")
     view = overview[overview["Style"].isin(sel_s) & overview["Destination"].isin(sel_d)]
-    st.dataframe(view, use_container_width=True, hide_index=True)
+    st.dataframe(view, hide_index=True, **kit.STRETCH)
 
     if any(s != "BE43WA7S" for s in sel_s):
         st.caption("⚠ Weights for BE43AA7S (culottes) have no reference - those cells are left yellow/blank. "
@@ -65,6 +78,10 @@ def run(xlsx_file=None):
     if view.empty:
         return
 
+    kit.step(3, "Selection",
+             f"{len(view)} style / colour / destination line(s) · {int(view['Total ctns'].sum()):,} cartons · "
+             f"{int(view['PO qty (pcs)'].sum()):,} pcs")
+    kit.step(4, "Download", "Packing lists follow the MUJI reference format (assort mixes and solid cartons).")
     if st.button("Generate packing lists", type="primary", key="muji_gen_btn"):
         wb = openpyxl.Workbook()
         wb.remove(wb.active)
@@ -81,10 +98,8 @@ def run(xlsx_file=None):
 
     if "muji_xlsx" in st.session_state:
         st.success(f"{st.session_state['muji_n']} packing list sheet(s) ready (formulas calculate when opened in Excel).")
-        st.download_button("⬇ Download Excel", st.session_state["muji_xlsx"],
-                           file_name="Muji_Packing_Lists.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           key="muji_dl_btn")
+        kit.download_block("⬇ Download packing list (Excel)", st.session_state["muji_xlsx"],
+                           "Muji_Packing_Lists.xlsx")
 
 
 if __name__ == "__main__":

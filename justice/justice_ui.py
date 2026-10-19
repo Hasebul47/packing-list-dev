@@ -1,23 +1,24 @@
 """
-Justice (Sports Products of America / Adjmi) buyer page for the unified router.
+Justice (Sports Products of America / Adjmi) - buyer page, shared design (pl_kit).
 
-Page order:
-  1. PO lines
-  2. Carton inputs (measurement / weight)  -> main packing table
-  3. Summary by size
-  4. Download Excel
+  1 PO summary -> 2 Packing table (editable, add / delete rows) -> 3 Variables
+  -> 4 Live check (order vs packed) -> 5 Download
 """
 from __future__ import annotations
 
+import dataclasses
+import sys
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-import justice_packing as jp
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:                      # pl_kit.py lives in the project root
+    sys.path.insert(0, _ROOT)
 
-_V = tuple(int(x) for x in st.__version__.split(".")[:2])
-_STRETCH = {"width": "stretch"} if _V >= (1, 50) else {"use_container_width": True}
+import pl_kit as kit                           # noqa: E402
+import justice_packing as jp                   # noqa: E402
 
 
 @st.cache_data(show_spinner="Reading PO…")
@@ -26,7 +27,7 @@ def _parse(data: bytes):
 
 
 def render(default_file=None) -> None:
-    st.header("Justice (SPA / Adjmi) — PO (PDF) → Packing list")
+    st.header("Justice (SPA / Adjmi) — PO → Packing list")
 
     data = None
     if default_file is not None:
@@ -49,108 +50,88 @@ def render(default_file=None) -> None:
     except Exception as e:  # noqa: BLE001
         st.error(f"Could not read the PO: {e}")
         return
-    for w in po.warnings:
-        st.warning(w)
+    kit.problems(po.warnings)
     if not po.lines:
         st.error("No PO lines found. Confirm this is a Justice / SPA purchase order PDF.")
         return
 
-    k = f"{po.po_no}_{po.ref_no}"
-    st.caption(
-        f"PO **{po.po_no}** · ref **{po.ref_no}** · style **{po.style}** · {po.desc} · "
-        f"{po.color} · {po.total_ctn:,} ctn · {po.total_units:,} pcs · ship {po.ship_date}"
-    )
-
-    # ------------------------------------------------------------ 1 PO lines
-    st.subheader("1 · PO lines")
+    k = f"jus_{po.po_no}_{po.ref_no}"
     sizes = po.sizes
-    rows = []
-    for ln in po.lines:
-        r = {"Label": ln.label, "Pack": ln.dim_pk, "Type": ln.kind,
-             "Pcs/Ctn": ln.pcs_per_ctn, "Ctns": ln.ctns, "Units": ln.units}
-        for s in sizes:
-            r[s] = ln.ratio[ln.sizes.index(s)] if s in ln.sizes else None
-        rows.append(r)
-    st.dataframe(pd.DataFrame(rows), hide_index=True,
-                 height=min(320, 40 + 35 * len(rows)), **_STRETCH)
 
-    # ------------------------------------------------------------ 2 inputs
-    st.subheader("2 · Carton measurement & weight")
-    c1, c2 = st.columns(2)
+    # ---------------------------------------------------------------- 1
+    kit.step(1, "PO summary")
+    kit.summary_cards([
+        ("PO", po.po_no), ("Style", po.style), ("Ship date", po.ship_date),
+        ("Cartons", f"{po.total_ctn:,}"), ("Pieces", f"{po.total_units:,}"),
+    ])
+    st.caption(f"{po.desc} · {po.color} · ref {po.ref_no} · {po.ship_type}")
+
+    # ---------------------------------------------------------------- 2
+    kit.step(2, "Packing table",
+             "Click any cell to change it. Use the + row at the bottom to add a pack. "
+             "To delete: tick 🗑 Delete on the row(s), then press “Remove ticked rows”. "
+             "Size columns = pieces per carton.")
+    base = pd.DataFrame(jp.rows_from_po(po))
+    cfg = {
+        jp.COL_LABEL: st.column_config.TextColumn("Label", width="small"),
+        jp.COL_PACK: st.column_config.TextColumn("Pack", width="small"),
+        jp.COL_CTNS: st.column_config.NumberColumn("Ctns", min_value=0, step=1, format="%d"),
+        jp.COL_L: st.column_config.NumberColumn(min_value=1.0, step=1.0),
+        jp.COL_W: st.column_config.NumberColumn(min_value=1.0, step=1.0),
+        jp.COL_H: st.column_config.NumberColumn(min_value=1.0, step=1.0),
+        jp.COL_NET: st.column_config.NumberColumn(min_value=0.0, step=0.01, format="%.3f"),
+    }
+    for s in sizes:
+        cfg[s] = st.column_config.NumberColumn(s, min_value=0, step=1, format="%d")
+    edited = kit.editable_grid(base, k, column_config=cfg)
+
+    lines, dims, net_pc, probs = jp.lines_from_rows(edited.to_dict("records"), sizes)
+    kit.problems(probs)
+    if not lines:
+        st.error("The table has no valid rows. Press “Reset table to PO” or add a row.")
+        return
+
+    # ---------------------------------------------------------------- 3
+    kit.step(3, "Variables", "Used for the carton plan and the Excel header. Dimensions and "
+                             "net weight per piece are in the table above (yellow cells in Excel).")
+    c1, c2, c3 = st.columns([1, 2, 3])
     tare = float(c1.number_input("Carton tare (kg)", min_value=0.0, value=float(jp.DEF_TARE),
-                                 step=0.1, key=f"jus_tare_{k}"))
-    company = c2.text_input("Company header", value="", key=f"jus_co_{k}",
-                            placeholder="Factory name (optional)")
-    address = st.text_input("Address", value="", key=f"jus_addr_{k}",
-                            placeholder="Factory address (optional)")
+                                 step=0.1, key=f"{k}_tare"))
+    company = c2.text_input("Company header", key=f"{k}_co", placeholder="Factory name (optional)")
+    address = c3.text_input("Address", key=f"{k}_addr", placeholder="Factory address (optional)")
 
-    inp = pd.DataFrame([{
-        "Label": ln.label, "Pack": ln.dim_pk, "Ctns": ln.ctns,
-        "L (cm)": jp.DEF_DIM[0], "W (cm)": jp.DEF_DIM[1], "H (cm)": jp.DEF_DIM[2],
-        "Net kg / pc": jp.DEF_NET,
-    } for ln in po.lines])
-    ed = st.data_editor(
-        inp, hide_index=True, key=f"jus_inp_{k}",
-        disabled=["Label", "Pack", "Ctns"],
-        column_config={
-            "L (cm)": st.column_config.NumberColumn(min_value=1.0, step=1.0),
-            "W (cm)": st.column_config.NumberColumn(min_value=1.0, step=1.0),
-            "H (cm)": st.column_config.NumberColumn(min_value=1.0, step=1.0),
-            "Net kg / pc": st.column_config.NumberColumn(min_value=0.0, step=0.01, format="%.3f"),
-        },
-        **_STRETCH,
-    )
-    dims = {i: (float(r["L (cm)"]), float(r["W (cm)"]), float(r["H (cm)"]))
-            for i, r in ed.reset_index(drop=True).iterrows()}
-    net_pc = {i: float(r["Net kg / pc"]) for i, r in ed.reset_index(drop=True).iterrows()}
-    plan = jp.build_carton_plan(po, dims, net_pc, tare)
+    po_e = dataclasses.replace(po, lines=lines)           # order_qty stays as printed on the PO
+    plan = jp.build_carton_plan(po_e, dims, net_pc, tare)
 
-    # ------------------------------------------------------------ main table
-    st.subheader("3 · Packing table")
-    table = []
+    # ---------------------------------------------------------------- carton plan (read-only result)
+    st.markdown("**Carton plan**  (calculated from your table)")
+    rows = []
     for r in plan:
-        t = {"From": r.ctn_from, "To": r.ctn_to, "Ctns": r.ctns,
-             "Label": f"{r.line.label} ({r.line.dim_pk})"}
-        for s in sizes:
-            t[s] = r.line.ratio[r.line.sizes.index(s)] if s in r.line.sizes else None
-        t.update({"Pcs/Ctn": r.pcs_per_ctn, "Total Pcs": r.total_pcs,
-                  "Meas (cm)": f"{r.L:g}×{r.W:g}×{r.H:g}", "CBM": r.cbm,
-                  "Nt/Ctn": r.nw_ctn, "Gr/Ctn": r.gw_ctn,
-                  "Total Nt": round(r.nw_ctn * r.ctns, 2),
-                  "Total Gr": round(r.gw_ctn * r.ctns, 2)})
-        table.append(t)
-    st.dataframe(pd.DataFrame(table), hide_index=True, **_STRETCH)
+        rows.append({"From": r.ctn_from, "To": r.ctn_to, "Ctns": r.ctns,
+                     "Label": f"{r.line.label} ({r.line.dim_pk})", "Pcs/Ctn": r.pcs_per_ctn,
+                     "Total pcs": r.total_pcs, "CBM": r.cbm,
+                     "Net/Ctn": r.nw_ctn, "Gross/Ctn": r.gw_ctn})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, **kit.STRETCH)
 
-    # ------------------------------------------------------------ summary
-    st.subheader("4 · Summary")
-    order = po.order_by_size
-    packed = {s: sum(r.ctns * r.line.ratio[r.line.sizes.index(s)]
-                     for r in plan if s in r.line.sizes) for s in sizes}
     tot_ctn = sum(r.ctns for r in plan)
     tot_pcs = sum(r.total_pcs for r in plan)
     tot_cbm = round(sum(r.cbm for r in plan), 3)
     tot_nt = round(sum(r.nw_ctn * r.ctns for r in plan), 2)
     tot_gr = round(sum(r.gw_ctn * r.ctns for r in plan), 2)
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Order qty", f"{po.total_units:,}")
-    m2.metric("Packed qty", f"{tot_pcs:,}", delta=f"{tot_pcs - po.total_units:+d}")
-    m3.metric("Cartons", f"{tot_ctn:,}")
-    m4.metric("CBM", f"{tot_cbm:,}")
-    m5.metric("Net / Gross kg", f"{tot_nt:,.0f} / {tot_gr:,.0f}")
-    st.dataframe(pd.DataFrame({
-        "Size": sizes,
-        "Order": [order[s] for s in sizes],
-        "Packed": [packed[s] for s in sizes],
-        "Excess": [packed[s] - order[s] for s in sizes],
-    }), hide_index=True, **_STRETCH)
+    kit.summary_cards([
+        ("Cartons", f"{tot_ctn:,}"), ("Pieces", f"{tot_pcs:,}"),
+        ("CBM", f"{tot_cbm:,}"), ("Net kg", f"{tot_nt:,.0f}"), ("Gross kg", f"{tot_gr:,.0f}"),
+    ])
 
-    # ------------------------------------------------------------ download
-    st.subheader("5 · Download")
-    xlsx = jp.make_packing_excel(po, plan, company=company, address=address)
-    fname = f"PACKING_LIST_{po.style}_{po.po_no}.xlsx"
-    st.download_button(
-        "⬇ Download packing list (Excel)", data=xlsx, file_name=fname,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
-    st.caption(f"{tot_ctn:,} cartons · {tot_pcs:,} pcs · CBM {tot_cbm} · file `{fname}`")
+    # ---------------------------------------------------------------- 4
+    kit.step(4, "Check against the PO")
+    ok = kit.check_by_size(po_e.sizes, po.order_by_size, po_e.packed_by_size())
+
+    # ---------------------------------------------------------------- 5
+    kit.step(5, "Download")
+    if not ok:
+        st.caption("The table differs from the PO. You can still download; the Excel size summary shows the difference.")
+    xlsx = jp.make_packing_excel(po_e, plan, company=company, address=address)
+    kit.download_block("⬇ Download packing list (Excel)", xlsx,
+                       f"PACKING_LIST_{po.style}_{po.po_no}.xlsx",
+                       f"{tot_ctn:,} cartons · {tot_pcs:,} pcs · CBM {tot_cbm}")

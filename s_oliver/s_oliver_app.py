@@ -14,9 +14,17 @@ import io
 import re
 from collections import OrderedDict
 
+import sys
+from pathlib import Path
+
 import pdfplumber
 import pandas as pd
 import streamlit as st
+
+_ROOT = str(Path(__file__).resolve().parent.parent)
+if _ROOT not in sys.path:                      # pl_kit.py lives in the project root
+    sys.path.insert(0, _ROOT)
+import pl_kit as kit                           # noqa: E402
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter as L
@@ -126,10 +134,33 @@ def build_carton_rows(groups, pack, netwt):
     return rows
 
 
+def rows_from_edit(recs, groups, netwt):
+    """Edited carton table -> carton rows (numbered, weights). recs keys: color, length, width, pcs, num."""
+    rows, problems, cno = [], [], 1
+    for n, r in enumerate(recs, 1):
+        color, length, w = r.get("color"), r.get("length"), r.get("width")
+        try:
+            pcs, num = int(float(r.get("pcs"))), int(float(r.get("num")))
+        except (TypeError, ValueError):
+            if color or length or w:
+                problems.append(f"Row {n}: pieces and cartons must be numbers - row ignored.")
+            continue
+        if color not in groups or length not in LENGTHS or w not in WIDTHS:
+            problems.append(f"Row {n}: pick colour, inseam and waist from the lists - row ignored.")
+            continue
+        if pcs <= 0 or num <= 0:
+            problems.append(f"Row {n}: pieces and cartons must be above 0 - row ignored.")
+            continue
+        rows.append({"from": cno, "to": cno + num - 1, "num": num, "color": color, "length": length,
+                     "width": w, "pcs": pcs, "per_gw": round(pcs * netwt[w] + EMPTY_CARTON, 2)})
+        cno += num
+    return rows, problems
+
+
 # ============================================================
 # EXCEL
 # ============================================================
-def build_workbook(head, groups, netwt, pack):
+def build_workbook(head, groups, netwt, pack, rows=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Final Packing List"
@@ -256,7 +287,7 @@ def build_workbook(head, groups, netwt, pack):
     box(R_GT, 1, R_GT, C_TOT + 3)
 
     # ---------------- carton detail ----------------
-    rows = build_carton_rows(groups, pack, netwt)
+    rows = rows if rows is not None else build_carton_rows(groups, pack, netwt)
     R_DET0 = R_GT + 2
 
     put(R_DET0, 1, "Carton No.", TNR, 10)
@@ -339,7 +370,7 @@ def build_workbook(head, groups, netwt, pack):
 # ============================================================
 def _render_order_table(groups):
     """Order qty table — one row per (colour, inseam), sizes as columns."""
-    st.markdown("##### Order Quantity (Summary of Total Breakdown)")
+    st.markdown("**Order quantity**  (summary of total breakdown)")
 
     rows = []
     for color, lengths in groups.items():
@@ -388,7 +419,7 @@ def _render_order_table(groups):
 
 def _render_carton_table(rows, head):
     """Carton detail table — matches the Excel layout."""
-    st.markdown("##### Carton Details")
+    st.markdown("**Carton details**  (calculated from your table)")
     if not rows:
         st.info("No carton rows to display.")
         return
@@ -449,7 +480,7 @@ def _render_carton_table(rows, head):
 
 def _render_summary_table(rows):
     """Summary table below the carton detail."""
-    st.markdown("##### Summary")
+    st.markdown("**Summary**")
     total_ctn = sum(r["num"] for r in rows)
     total_pcs = sum(r["pcs"] * r["num"] for r in rows)
     total_gw  = sum(r["per_gw"] * r["num"] for r in rows)
@@ -498,44 +529,70 @@ def run(pdf_file=None):
 
     groups = group_items(items)
     total_order = sum(it["qty"] for it in items)
-    st.success(f"PO {head['po']} - style {head['style']} - article {head['article']!r} - "
-               f"{len(groups)} colour(s) - {total_order:,} pcs")
+    key = f"so_{head['po']}"
 
-    with st.expander("Carton settings (not in the PO - edit if different)", expanded=False):
-        c1, c2 = st.columns(2)
-        with c1:
-            pack = st.number_input("Pieces per full carton", 1, 200, PACK_DEFAULT, 1)
-        with c2:
-            st.caption(f"Empty carton: {EMPTY_CARTON} kg · Carton {CARTON_DIM} cm")
-        st.markdown("**Net weight per piece (kg) by waist size**")
-        cols = st.columns(len(WIDTHS))
-        netwt = {}
-        for col, w in zip(cols, WIDTHS):
-            with col:
-                netwt[w] = st.number_input(w, 0.10, 2.00,
-                                           NETWT_DEFAULT.get(w, 0.40), 0.01,
-                                           format="%.2f", key=f"so_nw_{w}")
-
-    # ---- 1) ORDER QTY TABLE (BEFORE the main carton detail) ----
+    # ---- 1 summary
+    kit.step(1, "PO summary")
+    kit.summary_cards([("PO", head["po"]), ("Style", head["style"]), ("Colours", f"{len(groups)}"),
+                       ("Handover", head.get("handover") or "-"), ("Pieces", f"{total_order:,}")])
+    st.caption(f"Article: {head['article']}")
     _render_order_table(groups)
-    st.markdown("---")
 
-    # ---- 2) MAIN CARTON DETAIL TABLE ----
-    rows = build_carton_rows(groups, pack, netwt)
+    # ---- 2 variables
+    kit.step(2, "Packing settings", "Not in the PO - edit if different.")
+    c1, c2 = st.columns([1, 3])
+    pack = int(c1.number_input("Pieces per full carton", 1, 200, PACK_DEFAULT, 1, key=f"{key}_pack"))
+    c2.caption(f"Empty carton: {EMPTY_CARTON} kg · Carton {CARTON_DIM} cm")
+    st.markdown("**Net weight per piece (kg) by waist size**")
+    cols = st.columns(len(WIDTHS))
+    netwt = {}
+    for col, w in zip(cols, WIDTHS):
+        with col:
+            netwt[w] = st.number_input(w, 0.10, 2.00, NETWT_DEFAULT.get(w, 0.40), 0.01,
+                                       format="%.2f", key=f"so_nw_{w}")
+
+    # ---- 3 carton table
+    kit.step(3, "Carton table",
+             "Edit any cell, add a row with +, or tick 🗑 Delete and press “Remove ticked rows”. "
+             "Changing “Pieces per full carton” above rebuilds this table.")
+    auto = build_carton_rows(groups, pack, netwt)
+    base = pd.DataFrame([{"Color": r["color"], "Inseam": r["length"], "Waist": r["width"],
+                          "Pcs/Ctn": r["pcs"], "Cartons": r["num"]} for r in auto])
+    cfg = {"Color": st.column_config.SelectboxColumn("Color", options=list(groups.keys()), required=True),
+           "Inseam": st.column_config.SelectboxColumn("Inseam", options=LENGTHS, required=True),
+           "Waist": st.column_config.SelectboxColumn("Waist", options=WIDTHS, required=True),
+           "Pcs/Ctn": st.column_config.NumberColumn("Pcs/Ctn", min_value=1, step=1, format="%d"),
+           "Cartons": st.column_config.NumberColumn("Cartons", min_value=1, step=1, format="%d")}
+    ed = kit.editable_grid(base, f"{key}_ct_{pack}", column_config=cfg)
+    recs = [{"color": r["Color"], "length": r["Inseam"], "width": r["Waist"], "pcs": r["Pcs/Ctn"], "num": r["Cartons"]}
+            for r in ed.to_dict("records")]
+    rows, probs = rows_from_edit(recs, groups, netwt)
+    kit.problems(probs)
+    if not rows:
+        st.error("The carton table is empty. Press “Reset table to PO” or add a row.")
+        return
     _render_carton_table(rows, head)
 
-    # ---- 3) SUMMARY TABLE (AFTER the main table) ----
+    # ---- 4 check
+    kit.step(4, "Check against the PO")
+    order, packed = {}, {}
+    for color, lengths in groups.items():
+        for length, widths in lengths.items():
+            for w, q in widths.items():
+                lab = f"{color}-{length} / {w}"
+                order[lab] = q
+                packed[lab] = sum(r["pcs"] * r["num"] for r in rows
+                                  if (r["color"], r["length"], r["width"]) == (color, length, w))
+    kit.check_by_size(list(order), order, packed)
     _render_summary_table(rows)
 
-    wb = build_workbook(head, groups, netwt, int(pack))
+    # ---- 5 download
+    kit.step(5, "Download")
+    wb = build_workbook(head, groups, netwt, int(pack), rows=rows)
     buf = io.BytesIO()
     wb.save(buf)
-    st.download_button("Download packing list (.xlsx)", buf.getvalue(),
-                       file_name=f"packing_list_{head['po']}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       type="primary", key=f"so_dl_{head['po']}")
-    st.info("Empty-carton weight, carton dimensions and net-weight-per-piece are taken from "
-            "the defaults above; edit them if the actuals differ.")
+    kit.download_block("⬇ Download packing list (Excel)", buf.getvalue(), f"packing_list_{head['po']}.xlsx",
+                       "Empty-carton weight, carton size and net weight per piece use the settings above.")
 
 
 if __name__ == "__main__":

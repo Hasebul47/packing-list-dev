@@ -34,7 +34,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 import theme                      # shared palette / smooth-UI css / xlsx polish
-import final_db                   # green box: final completed XL files -> database
+import final_db                   # green box:Completed XL files -> database
 
 # ============================================================
 # Buyer registry
@@ -101,7 +101,9 @@ def detect_buyer_pdf(pdf_bytes: bytes):
     squashed = re.sub(r"[^A-Z0-9]", "", t2)
 
     # Abercrombie & Fitch
-    if ("ABERCROMBIE" in t or "FITCH PATH" in t):
+    # (EU POs are issued to "ABFICO Netherlands Distribution" - no "Abercrombie" on page 1)
+    if ("ABERCROMBIE" in t or "FITCH PATH" in t or "ABFICO" in squashed or "ANFCORP" in squashed
+            or ("HOLLISTERCO" in squashed and "POSKUSUMMARY" in squashed)):
         return "ANF"
     # Tally Weijl
     if ("TALLYWEIJL" in squashed or "TSWL" in squashed or "VIADUKTSTRASSE" in squashed
@@ -342,7 +344,7 @@ if not filled:
                        "Kontoor/Lee · s.Oliver · Carter's/OshKosh · A&F · Tally Weijl · Justice")
             st.caption("XLSX: Next Retail / Clover · Haddad · MUJI")
             st.caption("DOCX: JCPenney / Thereabouts")
-            st.caption("🟩 Green box: final completed Excel files → saved in the database")
+            st.caption("🟩 Green box: Completed Excel → Database")
     st.stop()
 
 # ============================================================
