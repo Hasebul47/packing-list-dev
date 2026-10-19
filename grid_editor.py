@@ -120,10 +120,10 @@ def _sticky_sel(prefix: str, gk: str) -> str:
     p = f'[class*="st-key-{prefix}"]'
     g = f".st-key-{gk}"
     return (
-        f'{g} > *:has(> {p}), '
-        f'{g} > [data-testid="stVerticalBlock"] > *:has(> {p}), '
+        f'{g} > *:has({p}), '
+        f'{g} > [data-testid="stVerticalBlock"]:not([class*="st-key-grid_"]) > *:has({p}), '
         f'{g} > {p}, '
-        f'{g} > [data-testid="stVerticalBlock"] > {p}'
+        f'{g} > [data-testid="stVerticalBlock"]:not([class*="st-key-grid_"]) > {p}'
     )
 
 
@@ -331,12 +331,14 @@ def render_carton_grid(
         row-gap: 0 !important;
     }}
     .st-key-{GK} [data-testid="stVerticalBlock"],
+    .st-key-{GK} [data-testid="stVerticalBlockBorderWrapper"],
+    .st-key-{GK} [data-testid="stLayoutWrapper"],
     .st-key-{GK} [data-testid="stElementContainer"],
     .st-key-{GK} [data-testid="stHorizontalBlock"],
     .st-key-{GK} [data-testid="stColumn"] {{
         overflow: visible !important;
     }}
-    .st-key-{GK} > [data-testid="stVerticalBlock"] {{
+    .st-key-{GK} > [data-testid="stVerticalBlock"]:not([class*="st-key-grid_"]) {{
         display: contents !important;
     }}
     .st-key-{GK} > *,
