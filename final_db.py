@@ -118,13 +118,24 @@ def _connect() -> sqlite3.Connection:
     return con
 
 
-def list_workbooks() -> list[dict]:
+def list_workbooks(search: str = "") -> list[dict]:
     with _connect() as con:
-        cur = con.execute(
-            "SELECT id, file_name, version, uploaded_at, buyer, po_no, style, order_qty, "
-            "sheet_count, row_count, formula_missing, size_bytes "
-            "FROM workbooks ORDER BY id DESC"
-        )
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            cur = con.execute(
+                "SELECT id, file_name, version, uploaded_at, buyer, po_no, style, order_qty, "
+                "sheet_count, row_count, formula_missing, size_bytes "
+                "FROM workbooks "
+                "WHERE file_name LIKE ? OR buyer LIKE ? OR po_no LIKE ? OR style LIKE ? "
+                "ORDER BY id DESC",
+                (term, term, term, term),
+            )
+        else:
+            cur = con.execute(
+                "SELECT id, file_name, version, uploaded_at, buyer, po_no, style, order_qty, "
+                "sheet_count, row_count, formula_missing, size_bytes "
+                "FROM workbooks ORDER BY id DESC"
+            )
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -368,31 +379,38 @@ def _parse_cached(file_name: str, data: bytes):
     return parse_workbook(file_name, data)
 
 
-def render_panel(files) -> None:
+def render_panel(files, search_query: str = "") -> None:
     """Preview + save button for the uploaded files, and the stored-files browser."""
+    search_term = (search_query or "").strip()
     n_stored = 0
     try:
-        stored = list_workbooks()
+        stored = list_workbooks(search=search_term)
         n_stored = len(stored)
     except Exception as e:                      # e.g. folder not writable
         st.error(f"Database not available: {e}")
         return
 
-    with st.expander(f"🗄 Final files → database  ·  {n_stored} stored", expanded=bool(files)):
+    expander_title = (
+        f"🗄 Final files → database  ·  {n_stored} found for '{search_term}'"
+        if search_term else
+        f"🗄 Final files → database  ·  {n_stored} stored"
+    )
+    with st.expander(expander_title, expanded=bool(files or search_term)):
         if files:
             st.markdown("##### To be saved")
             items = []
             for f in files:
-                data = f.getvalue()
+                fname = getattr(f, "name", "Unknown File")
+                data = f.getvalue() if hasattr(f, "getvalue") else (f if isinstance(f, (bytes, bytearray)) else b"")
                 if len(data) > MAX_FILE_MB * 1024 * 1024:
-                    st.error(f"**{f.name}** is larger than {MAX_FILE_MB} MB - skipped.")
+                    st.error(f"**{fname}** is larger than {MAX_FILE_MB} MB - skipped.")
                     continue
                 try:
-                    parsed = _parse_cached(f.name, data)
+                    parsed = _parse_cached(fname, bytes(data))
                 except Exception as e:
-                    st.error(f"**{f.name}** could not be read: {e}")
+                    st.error(f"**{fname}** could not be read: {e}")
                     continue
-                items.append((f.name, data, parsed))
+                items.append((fname, data, parsed))
 
             if items:
                 preview = []

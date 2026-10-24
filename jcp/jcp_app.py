@@ -1485,97 +1485,101 @@ def packs_from_edit(recs, packs):
 # ============================================================
 # 5. UI  (shared design - pl_kit)
 # ============================================================
-st.set_page_config(page_title="JCP PO -> Packing List", layout="wide", page_icon="📦")
-st.title("📦 JCPenney — PO to Packing List")
-st.caption("Upload a JCPenney PO (.docx) and download the JCP PC import packing list.")
+def run(file=None):
+    up = file if file is not None else st.file_uploader("Upload PO .docx", type=["docx"])
+    if up is None:
+        st.info("Upload a .docx to get started.")
+        st.stop()
 
-up = st.file_uploader("Upload PO .docx", type=["docx"])
-if up is None:
-    st.info("Upload a .docx to get started.")
-    st.stop()
+    try:
+        text = read_docx_text(up.getvalue())
+    except Exception as e:
+        st.error(f"Could not read the DOCX: {e}")
+        st.stop()
 
-try:
-    text = read_docx_text(up.getvalue())
-except Exception as e:
-    st.error(f"Could not read the DOCX: {e}")
-    st.stop()
+    try:
+        head, packs0 = parse_po(text)
+    except Exception as e:
+        st.error(f"Parse failed: {e}")
+        st.stop()
 
-try:
-    head, packs0 = parse_po(text)
-except Exception as e:
-    st.error(f"Parse failed: {e}")
-    st.stop()
+    if not packs0:
+        st.warning("No PREPACK blocks were found.")
+        with st.expander("Full extracted text", expanded=True):
+            st.code(text[:6000])
+        st.stop()
 
-if not packs0:
-    st.warning("No PREPACK blocks were found.")
-    with st.expander("Full extracted text", expanded=True):
-        st.code(text[:6000])
-    st.stop()
+    with st.expander("🔍 Extracted text from DOCX (first 250 lines)", expanded=False):
+        st.text("\n".join(text.splitlines()[:250]))
 
-with st.expander("🔍 Extracted text from DOCX (first 250 lines)", expanded=False):
-    st.text("\n".join(text.splitlines()[:250]))
+    k = f"jcp_{head.get('order_no', '')}_{head.get('item_number', '')}"
+    order_by_len = {ln: 0 for ln in LENGTHS}
+    for p in packs0:
+        for ln, q in _ratio_by_length(p).items():
+            order_by_len[ln] += q * int(p["total_pkg"])
 
-k = f"jcp_{head.get('order_no', '')}_{head.get('item_number', '')}"
-order_by_len = {ln: 0 for ln in LENGTHS}
-for p in packs0:
-    for ln, q in _ratio_by_length(p).items():
-        order_by_len[ln] += q * int(p["total_pkg"])
+    # ---- 1 summary
+    kit.step(1, "PO summary")
+    kit.summary_cards([("PO", str(head.get("order_no", ""))), ("Style", str(head.get("style", ""))),
+                       ("Item", str(head.get("item_number", ""))), ("Pack lines", f"{len(packs0)}"),
+                       ("Order qty", f"{sum(order_by_len.values()):,}")])
+    with st.expander("Order / destination details"):
+        _render_header_block(head)
 
-# ---- 1 summary
-kit.step(1, "PO summary")
-kit.summary_cards([("PO", str(head.get("order_no", ""))), ("Style", str(head.get("style", ""))),
-                   ("Item", str(head.get("item_number", ""))), ("Pack lines", f"{len(packs0)}"),
-                   ("Order qty", f"{sum(order_by_len.values()):,}")])
-with st.expander("Order / destination details"):
-    _render_header_block(head)
+    # ---- 2 variables
+    kit.step(2, "Variables", "Weights and volume per carton (not in the PO).")
+    v1, v2, v3, v4 = st.columns(4)
+    netnet = v1.number_input("NET NET kg/carton", 0.0, 100.0, DEFAULT_NETNET, 0.01, format="%.2f", key=f"{k}_nn")
+    net = v2.number_input("NET kg/carton", 0.0, 100.0, DEFAULT_NET, 0.01, format="%.2f", key=f"{k}_n")
+    gross = v3.number_input("GROSS kg/carton", 0.0, 100.0, DEFAULT_GROSS, 0.01, format="%.2f", key=f"{k}_g")
+    cbm = v4.number_input("CBM / carton", 0.0, 10.0, DEFAULT_CBM, 0.0001, format="%.4f", key=f"{k}_c")
 
-# ---- 2 variables
-kit.step(2, "Variables", "Weights and volume per carton (not in the PO).")
-v1, v2, v3, v4 = st.columns(4)
-netnet = v1.number_input("NET NET kg/carton", 0.0, 100.0, DEFAULT_NETNET, 0.01, format="%.2f", key=f"{k}_nn")
-net = v2.number_input("NET kg/carton", 0.0, 100.0, DEFAULT_NET, 0.01, format="%.2f", key=f"{k}_n")
-gross = v3.number_input("GROSS kg/carton", 0.0, 100.0, DEFAULT_GROSS, 0.01, format="%.2f", key=f"{k}_g")
-cbm = v4.number_input("CBM / carton", 0.0, 10.0, DEFAULT_CBM, 0.0001, format="%.4f", key=f"{k}_c")
+    # ---- 3 carton table
+    kit.step(3, "Carton table",
+             "One row per prepack line. Edit any cell, add a row with +, or tick 🗑 Delete and press “Remove ticked rows”. "
+             "Length columns = pieces of that length in one carton.")
+    import pandas as pd  # noqa: E402
+    base_rows = []
+    for p in packs0:
+        rbl = _ratio_by_length(p)
+        r = {"Line": p["order_line"], "Color": p["color"], "Code": p["prepack_code"]}
+        r.update({ln: rbl[ln] for ln in LENGTHS})
+        r.update({"Pcs/Ctn": p["pce_per_ctn"], "Cartons": int(p["total_pkg"])})
+        base_rows.append(r)
+    cfg = {ln: st.column_config.NumberColumn(ln, min_value=0, step=1, format="%d") for ln in LENGTHS}
+    cfg["Pcs/Ctn"] = st.column_config.NumberColumn("Pcs/Ctn", min_value=0, step=1, format="%d")
+    cfg["Cartons"] = st.column_config.NumberColumn("Cartons", min_value=0, step=1, format="%d")
+    ed = kit.editable_grid(pd.DataFrame(base_rows), k, column_config=cfg)
+    recs = [{"line": r["Line"], "color": r["Color"], "code": r["Code"], "ratio": {ln: r.get(ln) for ln in LENGTHS},
+             "pcs": r["Pcs/Ctn"], "ctn": r["Cartons"]} for r in ed.to_dict("records")]
+    packs, probs = packs_from_edit(recs, packs0)
+    kit.problems(probs)
+    if not packs:
+        st.error("The carton table is empty. Press “Reset table to PO” or add a row.")
+        st.stop()
+    _render_carton_detail(packs, netnet, net, gross, cbm, head)
 
-# ---- 3 carton table
-kit.step(3, "Carton table",
-         "One row per prepack line. Edit any cell, add a row with +, or tick 🗑 Delete and press “Remove ticked rows”. "
-         "Length columns = pieces of that length in one carton.")
-import pandas as pd  # noqa: E402
-base_rows = []
-for p in packs0:
-    rbl = _ratio_by_length(p)
-    r = {"Line": p["order_line"], "Color": p["color"], "Code": p["prepack_code"]}
-    r.update({ln: rbl[ln] for ln in LENGTHS})
-    r.update({"Pcs/Ctn": p["pce_per_ctn"], "Cartons": int(p["total_pkg"])})
-    base_rows.append(r)
-cfg = {ln: st.column_config.NumberColumn(ln, min_value=0, step=1, format="%d") for ln in LENGTHS}
-cfg["Pcs/Ctn"] = st.column_config.NumberColumn("Pcs/Ctn", min_value=0, step=1, format="%d")
-cfg["Cartons"] = st.column_config.NumberColumn("Cartons", min_value=0, step=1, format="%d")
-ed = kit.editable_grid(pd.DataFrame(base_rows), k, column_config=cfg)
-recs = [{"line": r["Line"], "color": r["Color"], "code": r["Code"], "ratio": {ln: r.get(ln) for ln in LENGTHS},
-         "pcs": r["Pcs/Ctn"], "ctn": r["Cartons"]} for r in ed.to_dict("records")]
-packs, probs = packs_from_edit(recs, packs0)
-kit.problems(probs)
-if not packs:
-    st.error("The carton table is empty. Press “Reset table to PO” or add a row.")
-    st.stop()
-_render_carton_detail(packs, netnet, net, gross, cbm, head)
+    # ---- 4 check
+    kit.step(4, "Check against the PO")
+    packed_by_len = {ln: 0 for ln in LENGTHS}
+    for p in packs:
+        for ln, q in _ratio_by_length(p).items():
+            packed_by_len[ln] += q * int(p["total_pkg"])
+    kit.check_by_size(LENGTHS, order_by_len, packed_by_len)
+    total_cartons = sum(int(p["total_pkg"]) for p in packs)
+    total_pcs = sum(p["pce_per_ctn"] * int(p["total_pkg"]) for p in packs)
+    kit.summary_cards([("Cartons", f"{total_cartons:,}"), ("Pieces", f"{total_pcs:,}"),
+                       ("Net kg", f"{total_cartons * net:,.1f}"), ("Gross kg", f"{total_cartons * gross:,.1f}"),
+                       ("CBM", f"{total_cartons * cbm:,.2f}")])
 
-# ---- 4 check
-kit.step(4, "Check against the PO")
-packed_by_len = {ln: 0 for ln in LENGTHS}
-for p in packs:
-    for ln, q in _ratio_by_length(p).items():
-        packed_by_len[ln] += q * int(p["total_pkg"])
-kit.check_by_size(LENGTHS, order_by_len, packed_by_len)
-total_cartons = sum(int(p["total_pkg"]) for p in packs)
-total_pcs = sum(p["pce_per_ctn"] * int(p["total_pkg"]) for p in packs)
-kit.summary_cards([("Cartons", f"{total_cartons:,}"), ("Pieces", f"{total_pcs:,}"),
-                   ("Net kg", f"{total_cartons * net:,.1f}"), ("Gross kg", f"{total_cartons * gross:,.1f}"),
-                   ("CBM", f"{total_cartons * cbm:,.2f}")])
+    # ---- 5 download
+    kit.step(5, "Download")
+    kit.download_block("⬇ Download packing list (Excel)", build_xlsx(head, packs, netnet, net, gross, cbm),
+                       f"packing_list_{head.get('order_no', '')}.xlsx")
 
-# ---- 5 download
-kit.step(5, "Download")
-kit.download_block("⬇ Download packing list (Excel)", build_xlsx(head, packs, netnet, net, gross, cbm),
-                   f"packing_list_{head.get('order_no', '')}.xlsx")
+
+if __name__ == "__main__":
+    st.set_page_config(page_title="JCP PO -> Packing List", layout="wide", page_icon="📦")
+    st.title("📦 JCPenney — PO to Packing List")
+    st.caption("Upload a JCPenney PO (.docx) and download the JCP PC import packing list.")
+    run()
