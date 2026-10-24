@@ -1,8 +1,0 @@
-# Auto detect text files and perform LF normalization
-* text=auto
-
-# Ensure workflows, shell scripts, and container files always use LF
-*.yml text eol=lf
-*.yaml text eol=lf
-*.sh text eol=lf
-Dockerfile text eol=lf
