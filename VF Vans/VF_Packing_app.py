@@ -1,3 +1,5 @@
+
+
 """
 PO -> Packing List Streamlit App
 =================================
@@ -298,382 +300,550 @@ def sheet_name_for(line):
 
 
 def build_sheet(ws, line, sublines):
-    sizes = [s["size"] for s in sublines]
+    """
+    Packing-list sheet.
+    Layout rules (centered design):
+    - Title rows are merged across the FULL table width (A .. last table column)
+    - SIZE / N.W. / N.N.W. / EMPTY CTN block is centered over the table
+    - Summary block (SIZE / CUT / ORDER / SHIP / EXS-SHT / % + G Total + weights)
+      sits under the table, its size columns aligned with the main size columns,
+      and its left/right margins balanced so it reads as centered
+    - Every cell is center/center; only bottom labels are right-aligned
+    """
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    # ---------- styles ----------
+    FONT = "Arial"
+    bold = Font(name=FONT, bold=True, size=10)
+    normal = Font(name=FONT, size=10)
+    title_font = Font(name=FONT, bold=True, size=13)
+    thin = Side(style="thin")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    right = Alignment(horizontal="right", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+    yellow = PatternFill("solid", fgColor="FFFF00")
+    grey = PatternFill("solid", fgColor="D9D9D9")
+
+    # ---------- helpers ----------
+    def style_range(r1, c1, r2, c2, border=None, fill=None, font=None, align=None):
+        """Apply style to every cell of a (possibly merged) range."""
+        for rr in range(r1, r2 + 1):
+            for cc in range(c1, c2 + 1):
+                cell = ws.cell(row=rr, column=cc)
+                if border is not None:
+                    cell.border = border
+                if fill is not None:
+                    cell.fill = fill
+                if font is not None:
+                    cell.font = font
+                if align is not None:
+                    cell.alignment = align
+
+    def put_merged(r1, c1, r2, c2, value=None, font=bold, fill=None,
+                   border=box, align=center):
+        """Merge a range, write value in top-left, style all cells."""
+        if (r1, c1) != (r2, c2):
+            ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
+        ws.cell(row=r1, column=c1, value=value)
+        style_range(r1, c1, r2, c2, border=border, fill=fill, font=font, align=align)
+
+    # ---------- unique sizes ----------
+    sizes = []
+    seen = set()
+    for s in sublines:
+        sz = s["size"]
+        if sz not in seen:
+            sizes.append(sz)
+            seen.add(sz)
     n_sizes = len(sizes)
 
-    ws.merge_cells("A1:H1")
-    ws["A1"] = "CREATIVE COLLECTIONS LTD"
+    # ---------- column map (main table) ----------
+    COL_CASE       = 1
+    COL_CARTON     = 2
+    COL_COLOR      = 3
+    COL_UPC        = 4
+    COL_SIZE_START = 5
+    COL_CTN_PCS    = 5 + n_sizes
+    COL_TOTAL_CTN  = COL_CTN_PCS + 1
+    COL_TOTAL_PCS  = COL_CTN_PCS + 2
+    COL_GRS_PR     = COL_CTN_PCS + 3
+    COL_NET_PR     = COL_CTN_PCS + 4
+    COL_TOTAL_GRS  = COL_CTN_PCS + 5
+    COL_TOTAL_NET  = COL_CTN_PCS + 6
+    n_cols = COL_TOTAL_NET            # last column of the table
+
+    # ---------- column widths (uniform: NO widened size columns) ----------
+    W_SIZE = 10
+    widths = {1: 18, 2: 14, 3: 14, 4: 16}
+    for i in range(n_sizes):
+        widths[COL_SIZE_START + i] = W_SIZE
+    for col in range(COL_CTN_PCS, n_cols + 1):
+        widths[col] = 13
+    for col, w in widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+    def centered_start(block_cols):
+        """First column so a block of `block_cols` columns is centered
+        (by real column width) under the full table A..n_cols."""
+        best, best_gap = 1, None
+        for s0 in range(1, n_cols - block_cols + 2):
+            lw = sum(widths[c] for c in range(1, s0))
+            rw = sum(widths[c] for c in range(s0 + block_cols, n_cols + 1))
+            gap = abs(lw - rw)
+            if best_gap is None or gap < best_gap:
+                best, best_gap = s0, gap
+        return best
+
+    # =========================================================
+    # 1. Title – merged over the WHOLE table width, centered
+    # =========================================================
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+    ws["A1"] = "CREATIVE COLLECTIONS LTD."
     ws["A1"].font = title_font
     ws["A1"].alignment = center
 
-    ws.merge_cells("A2:H2")
-    ws["A2"] = "PACKING LIST DETAILS"
-    ws["A2"].font = Font(name=FONT, bold=True, size=10)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=n_cols)
+    ws["A2"] = "PACKING LIST DETAILS."
+    ws["A2"].font = Font(name=FONT, bold=True, size=11)
     ws["A2"].alignment = center
 
+    # =========================================================
+    # 2. Weight spec table – centered over the table
+    #    label (2 merged cols) + one column per size
+    # =========================================================
     spec_header_row = 4
-    ws.cell(row=spec_header_row, column=1, value="SIZE").font = bold
-    ws.cell(row=spec_header_row, column=1).border = box
-    for sc_idx, size_name in enumerate(sizes):
-        c = ws.cell(row=spec_header_row, column=2 + sc_idx, value=size_name)
+    spec_c0 = centered_start(n_sizes + 2)          # first column of the block
+    spec_first = spec_c0 + 2                       # first size column
+    spec_last = spec_c0 + 1 + n_sizes              # last size column
+
+    put_merged(spec_header_row, spec_c0, spec_header_row, spec_c0 + 1,
+               "SIZE", font=bold, fill=grey)
+    for i, sz in enumerate(sizes):
+        c = ws.cell(row=spec_header_row, column=spec_first + i, value=sz)
         c.font = bold
-        c.alignment = center
         c.border = box
         c.fill = grey
+        c.alignment = center
 
-    spec_rows = ["N.W.", "N.N.W.", "EMPTY CTN"]
-    for i, label in enumerate(spec_rows):
-        rr = spec_header_row + 1 + i
-        lc = ws.cell(row=rr, column=1, value=label)
-        lc.font = bold
-        lc.border = box
-        for sc_idx, size_name in enumerate(sizes):
-            c = ws.cell(row=rr, column=2 + sc_idx, value=1)
-            c.alignment = center
+    for offset, label in enumerate(["N.W.", "N.N.W.", "EMPTY CTN"]):
+        r = spec_header_row + 1 + offset
+        put_merged(r, spec_c0, r, spec_c0 + 1, label, font=bold)
+        for i in range(n_sizes):
+            c = ws.cell(row=r, column=spec_first + i, value=1.0)
             c.border = box
+            c.alignment = center
+            c.font = normal
+            if label == "N.W.":
+                c.fill = yellow
 
-    r = spec_header_row + len(spec_rows) + 2
-    ws.cell(row=r, column=1, value="BUYER").font = bold
-    ws.cell(row=r, column=2, value="VANS").font = normal
-    r += 1
-    ws.cell(row=r, column=1, value="LOT NO").font = bold
-    ws.cell(row=r, column=2, value=line["style"]).font = normal
-    r += 1
-    ws.cell(row=r, column=1, value="P.O NO").font = bold
-    ws.cell(row=r, column=2, value=line["po_line_no"]).font = normal
-    r += 1
-    ws.cell(row=r, column=1, value="ORDER QTY").font = bold
-    ws.cell(row=r, column=2, value=line["order_qty"]).font = normal
-    ws.cell(row=r, column=3, value="PCS").font = normal
-    r += 1
-    ws.cell(row=r, column=1, value="PACK QTY").font = bold
-    pack_qty_row = r
-    ws.cell(row=r, column=2, value=line["order_qty"]).font = normal
-    ws.cell(row=r, column=3, value="PCS").font = normal
-    r += 1
-    excess_short_row = r
-    ws.cell(row=r, column=1, value="EXCESS/SHORT QTY").font = bold
-    ws.cell(row=r, column=3, value="PCS").font = normal
-    r += 1
-    percentage_row = r
-    ws.cell(row=r, column=1, value="PERCENTAGE").font = bold
-    r += 1
-    ws.cell(row=r, column=1, value="CRD").font = bold
-    ws.cell(row=r, column=2, value=line.get("crd")).font = normal
-    r += 1
-    ws.cell(row=r, column=1, value="COUNTRY").font = bold
-    ws.cell(row=r, column=2, value=line.get("destination_country")).font = normal
-    r += 1
-    ws.cell(row=r, column=1, value="DESCRIPTION").font = bold
-    ws.cell(row=r, column=2, value=line["description"]).font = normal
+    # =========================================================
+    # 3. Header info block
+    #    left : labels + values (values merged so long text never clips)
+    #    right: qty block pinned to the right edge of the table
+    # =========================================================
+    info_start = 9
+    val_c1, val_c2 = 2, COL_SIZE_START + 3          # B .. H
 
-    header_row = r + 2
-    headers = ["CASE LABEL NO.", "CARTON NO.", "COLOR", "UPC Number"] + sizes + \
-              ["CTN PCS", "TOTAL CTN", "TOTAL PCS", "Grs.wt.pr ctn", "Net.wt.pr ctn",
-               "total.Grs.wt", "total.net.wt"]
-    for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=header_row, column=i, value=h)
+    def info_left(row, label, value):
+        c = ws.cell(row=row, column=1, value=label)
         c.font = bold
+        c.alignment = left
+        ws.merge_cells(start_row=row, start_column=val_c1, end_row=row, end_column=val_c2)
+        v = ws.cell(row=row, column=val_c1, value=value)
+        v.font = normal
+        v.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    info_left(info_start,     "BUYER",       "VANS")
+    info_left(info_start + 1, "LOT NO",      line.get("style", ""))
+    info_left(info_start + 2, "P.O NO",      line.get("po_line_no", ""))
+    info_left(info_start + 3, "DESCRIPTION", line.get("description", ""))
+
+    # long merged text -> give the row enough height
+    avail_chars = int(sum(widths[c] for c in range(val_c1, val_c2 + 1)) * 0.95)
+    for k, key in enumerate(["style", "po_line_no", "description"], start=1):
+        txt = str(line.get(key, "") or "")
+        n_lines = max(1, -(-len(txt) // max(avail_chars, 1)))
+        if n_lines > 1:
+            ws.row_dimensions[info_start + k].height = 14 * n_lines
+
+    # right block: [label x2][value][unit]   [CRD label][CRD value]
+    lab_c = n_cols - 6          # label (merged over 2 cols)
+    val_c = n_cols - 4
+    unit_c = n_cols - 3
+    crd_l = n_cols - 1
+    crd_v = n_cols
+
+    def info_right(row, label):
+        put_merged(row, lab_c, row, lab_c + 1, label, font=bold, border=None)
+        v = ws.cell(row=row, column=val_c)
+        v.font = normal
+        v.alignment = center
+        return v
+
+    ws.cell(row=info_start, column=val_c, value=line.get("order_qty", 0))
+    order_cell = info_right(info_start, "ORDER QTY")
+    pack_qty_cell = info_right(info_start + 1, "PACK QTY")
+    excess_cell   = info_right(info_start + 2, "EXCESS/SHORT QTY")
+    pct_cell      = info_right(info_start + 3, "PERCENTAGE")
+    for row, unit in enumerate(["PCS", "PCS", "PCS", "%"], start=info_start):
+        c = ws.cell(row=row, column=unit_c, value=unit)
+        c.font = normal
         c.alignment = center
+
+    c = ws.cell(row=info_start, column=crd_l, value="CRD")
+    c.font = bold
+    c.alignment = center
+    c = ws.cell(row=info_start, column=crd_v, value=line.get("crd", ""))
+    c.font = normal
+    c.alignment = center
+
+    c = ws.cell(row=info_start + 1, column=crd_l, value="COUNTRY")
+    c.font = bold
+    c.alignment = center
+    c = ws.cell(row=info_start + 1, column=crd_v, value=line.get("destination_country", ""))
+    c.font = normal
+    c.alignment = center
+
+    # =========================================================
+    # 4. Main carton table header
+    # =========================================================
+    header_row = info_start + 6
+
+    headers = (
+        ["CASE LABEL NO.", "CARTON NO.", "COLOR", "UPC Number"]
+        + sizes
+        + ["CTN PCS", "TOTAL CTN", "TOTAL PCS",
+           "Grs.wt.pr ctn", "Net.wt.pr ctn", "total.Grs.wt", "total.net.wt"]
+    )
+
+    for col_idx, h in enumerate(headers, start=1):
+        c = ws.cell(row=header_row, column=col_idx, value=h)
+        c.font = bold
         c.border = box
         c.fill = grey
-    n_cols = len(headers)
+        c.alignment = center
+    ws.row_dimensions[header_row].height = 30
 
+    # =========================================================
+    # 5. Carton data rows
+    # =========================================================
     pdf_max_by_size = {s["size"]: int(s.get("items_per_outer_pack") or 1) for s in sublines}
-    data_row_start = header_row + 1
     carton_rows = compute_carton_rows_v3(sublines, pdf_max_by_size, mode="solid_mixed")
+
+    data_start = header_row + 1
+    running_carton = 0
+
     for idx, row_data in enumerate(carton_rows):
-        rr = data_row_start + idx
-        ws.cell(row=rr, column=1, value=idx + 1).border = box
+        r = data_start + idx
+
+        c = ws.cell(row=r, column=COL_CASE, value=idx + 1)
+        c.border = box
+        c.alignment = center
+
+        total_ctn = int(row_data["total_ctn"])
+        start_ctn = running_carton + 1
+        end_ctn = running_carton + total_ctn
+        running_carton = end_ctn
+        carton_label = str(start_ctn) if start_ctn == end_ctn else f"{start_ctn}-{end_ctn}"
+        c = ws.cell(row=r, column=COL_CARTON, value=carton_label)
+        c.border = box
+        c.alignment = center
 
         color_val = row_data["color"] if row_data["color"] is not None else "MIXED"
-        color_cell = ws.cell(row=rr, column=3, value=color_val)
-        color_cell.border = box
-        if row_data["mixed"]:
-            color_cell.fill = yellow
-        ws.cell(row=rr, column=4, value=row_data["upc"]).border = box
-        for sc_idx, size_name in enumerate(sizes):
-            col = 5 + sc_idx
-            val = row_data["sizes"].get(size_name)
-            cell = ws.cell(row=rr, column=col, value=val)
-            cell.border = box
-            cell.alignment = center
+        c = ws.cell(row=r, column=COL_COLOR, value=color_val)
+        c.border = box
+        c.alignment = center
+        if row_data.get("mixed"):
+            c.fill = yellow
 
-        ctn_pcs_col = 5 + n_sizes
-        first_size_letter = get_column_letter(5)
-        last_size_letter = get_column_letter(4 + n_sizes)
-        ctn_cell = ws.cell(
-            row=rr, column=ctn_pcs_col,
-            value=f"=SUM({first_size_letter}{rr}:{last_size_letter}{rr})"
-        )
-        ctn_cell.border = box
-        ctn_cell.alignment = center
-        ctn_cell.font = bold
+        c = ws.cell(row=r, column=COL_UPC, value=row_data.get("upc") or "")
+        c.border = box
+        c.alignment = center
 
-        total_ctn_col = ctn_pcs_col + 1
-        total_pcs_col = ctn_pcs_col + 2
-        total_ctn_letter = get_column_letter(total_ctn_col)
+        for i, sz in enumerate(sizes):
+            val = row_data["sizes"].get(sz)
+            c = ws.cell(row=r, column=COL_SIZE_START + i, value=val if val else None)
+            c.border = box
+            c.alignment = center
 
-        tc_cell = ws.cell(row=rr, column=total_ctn_col, value=row_data["total_ctn"])
-        tc_cell.border = box
-        tc_cell.alignment = center
+        first_sz = get_column_letter(COL_SIZE_START)
+        last_sz  = get_column_letter(COL_SIZE_START + n_sizes - 1)
+        c = ws.cell(row=r, column=COL_CTN_PCS,
+                    value=f"=SUM({first_sz}{r}:{last_sz}{r})")
+        c.border = box
+        c.alignment = center
+        c.font = bold
 
-        if idx == 0:
-            carton_formula = f"={total_ctn_letter}{rr}"
-        else:
-            carton_formula = f"={get_column_letter(2)}{rr - 1}+{total_ctn_letter}{rr}"
-        cB = ws.cell(row=rr, column=2, value=carton_formula)
-        cB.border = box
-        cB.alignment = center
+        c = ws.cell(row=r, column=COL_TOTAL_CTN, value=total_ctn)
+        c.border = box
+        c.alignment = center
 
-        ctn_pcs_letter = get_column_letter(ctn_pcs_col)
-        tp_cell = ws.cell(
-            row=rr, column=total_pcs_col,
-            value=f"={total_ctn_letter}{rr}*{ctn_pcs_letter}{rr}"
-        )
-        tp_cell.border = box
-        tp_cell.alignment = center
+        ctn_pcs_l = get_column_letter(COL_CTN_PCS)
+        tot_ctn_l = get_column_letter(COL_TOTAL_CTN)
+        c = ws.cell(row=r, column=COL_TOTAL_PCS,
+                    value=f"={tot_ctn_l}{r}*{ctn_pcs_l}{r}")
+        c.border = box
+        c.alignment = center
 
-        grs_wt_col = total_pcs_col + 1
+        # Gross weight per carton (spec block may be shifted -> use spec_first/last)
         nw_row = spec_header_row + 1
         empty_row = spec_header_row + 3
-        first_spec_letter = get_column_letter(2)
-        last_spec_letter = get_column_letter(1 + n_sizes)
-        first_main_size_letter = get_column_letter(5)
-        last_main_size_letter = get_column_letter(4 + n_sizes)
+        first_spec = get_column_letter(spec_first)
+        last_spec  = get_column_letter(spec_last)
 
         grs_formula = (
-            f"=SUMPRODUCT({first_main_size_letter}{rr}:{last_main_size_letter}{rr},"
-            f"{first_spec_letter}{nw_row}:{last_spec_letter}{nw_row})"
-            f"+{first_spec_letter}{empty_row}"
+            f"=SUMPRODUCT({first_sz}{r}:{last_sz}{r},"
+            f"{first_spec}{nw_row}:{last_spec}{nw_row})"
+            f"+{first_spec}{empty_row}"
         )
-        grs_cell = ws.cell(row=rr, column=grs_wt_col, value=grs_formula)
-        grs_cell.border = box
-        grs_cell.alignment = center
+        c = ws.cell(row=r, column=COL_GRS_PR, value=grs_formula)
+        c.border = box
+        c.alignment = center
 
-        net_wt_col = grs_wt_col + 1
-        grs_wt_letter_for_net = get_column_letter(grs_wt_col)
-        net_cell = ws.cell(
-            row=rr, column=net_wt_col,
-            value=f"={grs_wt_letter_for_net}{rr}-{first_spec_letter}{empty_row}"
-        )
-        net_cell.border = box
-        net_cell.alignment = center
+        grs_l = get_column_letter(COL_GRS_PR)
+        c = ws.cell(row=r, column=COL_NET_PR,
+                    value=f"={grs_l}{r}-{first_spec}{empty_row}")
+        c.border = box
+        c.alignment = center
 
-        total_grs_col = net_wt_col + 1
-        grs_wt_letter = get_column_letter(grs_wt_col)
-        tg_cell = ws.cell(
-            row=rr, column=total_grs_col,
-            value=f"={total_ctn_letter}{rr}*{grs_wt_letter}{rr}"
-        )
-        tg_cell.border = box
-        tg_cell.alignment = center
+        c = ws.cell(row=r, column=COL_TOTAL_GRS,
+                    value=f"={tot_ctn_l}{r}*{grs_l}{r}")
+        c.border = box
+        c.alignment = center
 
-        total_net_col = total_grs_col + 1
-        net_wt_letter = get_column_letter(net_wt_col)
-        tn_cell = ws.cell(
-            row=rr, column=total_net_col,
-            value=f"={total_ctn_letter}{rr}*{net_wt_letter}{rr}"
-        )
-        tn_cell.border = box
-        tn_cell.alignment = center
+        net_l = get_column_letter(COL_NET_PR)
+        c = ws.cell(row=r, column=COL_TOTAL_NET,
+                    value=f"={tot_ctn_l}{r}*{net_l}{r}")
+        c.border = box
+        c.alignment = center
 
-    total_row = data_row_start + len(carton_rows)
-    ws.cell(row=total_row, column=3, value="TOTAL").font = bold
-    total_ctn_letter_for_sum = get_column_letter(total_ctn_col)
-    for sc_idx, size_name in enumerate(sizes):
-        col = 5 + sc_idx
-        col_letter = get_column_letter(col)
-        cell = ws.cell(
+    data_end = data_start + len(carton_rows) - 1
+    total_row = data_end + 1
+
+    # =========================================================
+    # 6. TOTAL row
+    # =========================================================
+    for col in range(1, n_cols + 1):
+        ws.cell(row=total_row, column=col).border = box
+        ws.cell(row=total_row, column=col).alignment = center
+
+    ws.cell(row=total_row, column=COL_COLOR, value="TOTAL").font = bold
+
+    tot_ctn_l = get_column_letter(COL_TOTAL_CTN)
+    for i in range(n_sizes):
+        col = COL_SIZE_START + i
+        col_l = get_column_letter(col)
+        c = ws.cell(
             row=total_row, column=col,
-            value=f"=SUMPRODUCT({col_letter}{data_row_start}:{col_letter}{total_row-1},"
-                  f"{total_ctn_letter_for_sum}{data_row_start}:{total_ctn_letter_for_sum}{total_row-1})"
+            value=f"=SUMPRODUCT({col_l}{data_start}:{col_l}{data_end},"
+                  f"{tot_ctn_l}{data_start}:{tot_ctn_l}{data_end})"
         )
-        cell.font = bold
-        cell.border = box
+        c.font = bold
+        c.border = box
+        c.alignment = center
 
-    total_ctn_col = ctn_pcs_col + 1
-    total_pcs_col = ctn_pcs_col + 2
-    total_ctn_letter = get_column_letter(total_ctn_col)
-    total_pcs_letter = get_column_letter(total_pcs_col)
+    c = ws.cell(row=total_row, column=COL_TOTAL_CTN,
+                value=f"=SUM({tot_ctn_l}{data_start}:{tot_ctn_l}{data_end})")
+    c.font = bold
+    c.border = box
+    c.alignment = center
 
-    ws.cell(row=total_row, column=total_ctn_col,
-            value=f'=IF(COUNT({total_ctn_letter}{data_row_start}:{total_ctn_letter}{total_row-1})=0,"",'
-                  f'SUM({total_ctn_letter}{data_row_start}:{total_ctn_letter}{total_row-1}))').font = bold
+    tot_pcs_l = get_column_letter(COL_TOTAL_PCS)
+    c = ws.cell(row=total_row, column=COL_TOTAL_PCS,
+                value=f"=SUM({tot_pcs_l}{data_start}:{tot_pcs_l}{data_end})")
+    c.font = bold
+    c.border = box
+    c.alignment = center
 
-    ws.cell(row=total_row, column=total_pcs_col,
-            value=f'=IF(COUNT({total_pcs_letter}{data_row_start}:{total_pcs_letter}{total_row-1})=0,"",'
-                  f'SUM({total_pcs_letter}{data_row_start}:{total_pcs_letter}{total_row-1}))').font = bold
+    for col in (COL_TOTAL_GRS, COL_TOTAL_NET):
+        col_l = get_column_letter(col)
+        c = ws.cell(row=total_row, column=col,
+                    value=f"=SUM({col_l}{data_start}:{col_l}{data_end})")
+        c.font = bold
+        c.border = box
+        c.alignment = center
 
-    grs_wt_col = total_pcs_col + 1
-    net_wt_col = total_pcs_col + 2
-    grs_wt_letter = get_column_letter(grs_wt_col)
-    net_wt_letter = get_column_letter(net_wt_col)
+    # =========================================================
+    # 7. Summary block
+    #    label  : C:D merged
+    #    sizes  : exactly under the main size columns
+    #    G Total: under CTN PCS
+    #    GW     : TOTAL CTN : TOTAL PCS   (merged, rows merged too)
+    #    NW     : Grs.wt.pr ctn : Net.wt.pr ctn (merged, rows merged too)
+    #    -> block spans C .. n_cols-2, i.e. balanced margins either side
+    # =========================================================
+    sum_header = total_row + 3
+    SUM_LABEL_C1, SUM_LABEL_C2 = COL_COLOR, COL_UPC          # C:D
 
-    ws.cell(row=total_row, column=grs_wt_col,
-            value=f"=SUMPRODUCT({grs_wt_letter}{data_row_start}:{grs_wt_letter}{total_row-1},"
-                  f"{total_ctn_letter}{data_row_start}:{total_ctn_letter}{total_row-1})").font = bold
-    ws.cell(row=total_row, column=net_wt_col,
-            value=f"=SUMPRODUCT({net_wt_letter}{data_row_start}:{net_wt_letter}{total_row-1},"
-                  f"{total_ctn_letter}{data_row_start}:{total_ctn_letter}{total_row-1})").font = bold
+    gt_col = COL_CTN_PCS
+    gw_c1, gw_c2 = COL_TOTAL_CTN, COL_TOTAL_PCS
+    nw_c1, nw_c2 = COL_GRS_PR, COL_NET_PR
 
-    total_grs_col = total_pcs_col + 3
-    total_grs_letter = get_column_letter(total_grs_col)
-    ws.cell(row=total_row, column=total_grs_col,
-            value=f'=IF(COUNT({total_grs_letter}{data_row_start}:{total_grs_letter}{total_row-1})=0,"",'
-                  f'SUM({total_grs_letter}{data_row_start}:{total_grs_letter}{total_row-1}))').font = bold
+    put_merged(sum_header, SUM_LABEL_C1, sum_header, SUM_LABEL_C2,
+               "SIZE", font=bold, fill=grey)
 
-    total_net_col = total_grs_col + 1
-    total_net_letter = get_column_letter(total_net_col)
-    ws.cell(row=total_row, column=total_net_col,
-            value=f'=IF(COUNT({total_net_letter}{data_row_start}:{total_net_letter}{total_row-1})=0,"",'
-                  f'SUM({total_net_letter}{data_row_start}:{total_net_letter}{total_row-1}))').font = bold
+    for i, sz in enumerate(sizes):
+        c = ws.cell(row=sum_header, column=COL_SIZE_START + i, value=sz)
+        c.font = bold
+        c.border = box
+        c.fill = grey
+        c.alignment = center
 
-    sum_header_row = total_row + 3
-    ws.cell(row=sum_header_row, column=1, value="SIZE").font = bold
-    for sc_idx, size_name in enumerate(sizes):
-        ws.cell(row=sum_header_row, column=2 + sc_idx, value=size_name).font = bold
-    ws.cell(row=sum_header_row, column=2 + n_sizes, value="G TOTAL").font = bold
+    c = ws.cell(row=sum_header, column=gt_col, value="G Total")
+    c.font = bold
+    c.border = box
+    c.fill = grey
+    c.alignment = center
 
-    gw_col = 3 + n_sizes
-    nw_col = 4 + n_sizes
-    ws.merge_cells(start_row=sum_header_row, start_column=gw_col,
-                    end_row=sum_header_row, end_column=gw_col)
-    ws.cell(row=sum_header_row, column=gw_col, value="Grand Total gross weight (kg)").font = bold
-    ws.cell(row=sum_header_row, column=gw_col).alignment = center
-    ws.merge_cells(start_row=sum_header_row, start_column=nw_col,
-                    end_row=sum_header_row, end_column=nw_col)
-    ws.cell(row=sum_header_row, column=nw_col, value="Grand Total net weight (kg)").font = bold
-    ws.cell(row=sum_header_row, column=nw_col).alignment = center
+    put_merged(sum_header, gw_c1, sum_header, gw_c2,
+               "Grand Total gross weight kg", font=bold, fill=grey)
+    put_merged(sum_header, nw_c1, sum_header, nw_c2,
+               "Grand Total Netweight kg", font=bold, fill=grey)
+    ws.row_dimensions[sum_header].height = 30
 
     rows_needed = ["CUT QTY", "ORDER QTY", "SHIP QTY", "EXS/SHT QTY", "PERCENTAGE"]
+    cut_r   = sum_header + 1 + rows_needed.index("CUT QTY")
+    order_r = sum_header + 1 + rows_needed.index("ORDER QTY")
+    ship_r  = sum_header + 1 + rows_needed.index("SHIP QTY")
+    exs_r   = sum_header + 1 + rows_needed.index("EXS/SHT QTY")
+    pct_r   = sum_header + 1 + rows_needed.index("PERCENTAGE")
+
+    first_l = get_column_letter(COL_SIZE_START)
+    last_l  = get_column_letter(COL_SIZE_START + n_sizes - 1)
+    gt_l    = get_column_letter(gt_col)
+
     for i, label in enumerate(rows_needed):
-        rr = sum_header_row + 1 + i
-        ws.cell(row=rr, column=1, value=label).font = bold
-        for sc_idx, size_name in enumerate(sizes):
-            col = 2 + sc_idx
-            col_letter = get_column_letter(col)
-            cell = ws.cell(row=rr, column=col)
+        r = sum_header + 1 + i
+        put_merged(r, SUM_LABEL_C1, r, SUM_LABEL_C2, label, font=bold)
+
+        for j, sz in enumerate(sizes):
+            col = COL_SIZE_START + j
+            col_l = get_column_letter(col)
+            cell = ws.cell(row=r, column=col)
+            cell.border = box
+            cell.alignment = center
+            cell.font = normal
+
             if label == "ORDER QTY":
-                qty = next(s["qty"] for s in sublines if s["size"] == size_name)
-                cell.value = qty
+                cell.value = next((s["qty"] for s in sublines if s["size"] == sz), 0)
             elif label == "CUT QTY":
                 cell.fill = yellow
             elif label == "SHIP QTY":
-                main_size_col = 5 + sc_idx
-                main_size_letter = get_column_letter(main_size_col)
-                cell.value = f"={main_size_letter}{total_row}"
+                cell.value = f"={col_l}{total_row}"
             elif label == "EXS/SHT QTY":
-                ship_row = sum_header_row + 1 + rows_needed.index("SHIP QTY")
-                order_row = sum_header_row + 1 + rows_needed.index("ORDER QTY")
-                cell.value = f'=IF({col_letter}{ship_row}="","",{col_letter}{ship_row}-{col_letter}{order_row})'
+                cell.value = f'=IF({col_l}{ship_r}="","",{col_l}{ship_r}-{col_l}{order_r})'
             elif label == "PERCENTAGE":
-                exs_row = sum_header_row + 1 + rows_needed.index("EXS/SHT QTY")
-                order_row = sum_header_row + 1 + rows_needed.index("ORDER QTY")
-                cell.value = f'=IF({col_letter}{exs_row}="","",IFERROR({col_letter}{exs_row}/{col_letter}{order_row},0))'
+                cell.value = f'=IF({col_l}{exs_r}="","",IFERROR({col_l}{exs_r}/{col_l}{order_r},0))'
                 cell.number_format = "0.00%"
-            cell.border = box
-            cell.alignment = center
 
-        gt_col = 2 + n_sizes
-        gt_letter = get_column_letter(gt_col)
-        first_letter = get_column_letter(2)
-        last_letter = get_column_letter(1 + n_sizes)
+        gt_cell = ws.cell(row=r, column=gt_col)
+        gt_cell.border = box
+        gt_cell.font = bold
+        gt_cell.alignment = center
+
         if label in ("CUT QTY", "EXS/SHT QTY"):
-            ws.cell(row=rr, column=gt_col,
-                    value=f'=IF(COUNT({first_letter}{rr}:{last_letter}{rr})=0,"",SUM({first_letter}{rr}:{last_letter}{rr}))').font = bold
+            gt_cell.value = f'=IF(COUNT({first_l}{r}:{last_l}{r})=0,"",SUM({first_l}{r}:{last_l}{r}))'
         elif label in ("ORDER QTY", "SHIP QTY"):
-            ws.cell(row=rr, column=gt_col,
-                    value=f"=SUM({first_letter}{rr}:{last_letter}{rr})").font = bold
+            gt_cell.value = f"=SUM({first_l}{r}:{last_l}{r})"
         else:
-            exs_row = sum_header_row + 1 + rows_needed.index("EXS/SHT QTY")
-            order_row = sum_header_row + 1 + rows_needed.index("ORDER QTY")
-            ws.cell(row=rr, column=gt_col,
-                    value=f'=IF({gt_letter}{exs_row}="","",IFERROR({gt_letter}{exs_row}/{gt_letter}{order_row},0))').number_format = "0.00%"
-        ws.cell(row=rr, column=gt_col).border = box
+            gt_cell.value = f'=IF({gt_l}{exs_r}="","",IFERROR({gt_l}{exs_r}/{gt_l}{order_r},0))'
+            gt_cell.number_format = "0.00%"
 
-    exs_gt_row = sum_header_row + 1 + rows_needed.index("EXS/SHT QTY")
-    order_gt_row = sum_header_row + 1 + rows_needed.index("ORDER QTY")
-    gt_col_letter = get_column_letter(2 + n_sizes)
-
-    ship_gt_row = sum_header_row + 1 + rows_needed.index("SHIP QTY")
-    ws.cell(row=pack_qty_row, column=2, value=f'={gt_col_letter}{ship_gt_row}').font = normal
-    ws.cell(row=excess_short_row, column=2,
-            value=f'={gt_col_letter}{exs_gt_row}').font = normal
-    ws.cell(row=percentage_row, column=2,
-            value=f'=IF({gt_col_letter}{exs_gt_row}="","-",'
-                  f'TEXT(IFERROR({gt_col_letter}{exs_gt_row}/{gt_col_letter}{order_gt_row},0),"0.00%"))'
-            ).font = normal
-
-    wt_row = sum_header_row + len(rows_needed) + 2
-    total_grs_letter = get_column_letter(total_grs_col)
-    total_net_letter = get_column_letter(total_net_col)
-    total_ctn_letter_final = get_column_letter(total_ctn_col)
-
-    ws.cell(row=wt_row, column=1, value="GROSS WEIGHT :").font = bold
-    c = ws.cell(row=wt_row, column=2, value=f"={total_grs_letter}{total_row}")
-    c.font = bold
-    c.border = box
-    c.alignment = center
-
-    ws.cell(row=wt_row + 1, column=1, value="NET WEIGHT :").font = bold
-    c = ws.cell(row=wt_row + 1, column=2, value=f"={total_net_letter}{total_row}")
-    c.font = bold
-    c.border = box
-    c.alignment = center
-
-    ws.cell(row=wt_row + 2, column=1, value="CTN MEAS :").font = bold
-    ws.cell(row=wt_row + 2, column=2).fill = yellow
-    ws.cell(row=wt_row + 2, column=2).border = box
-    ws.cell(row=wt_row + 3, column=2).fill = yellow
-    ws.cell(row=wt_row + 3, column=2).border = box
-
-    ws.cell(row=wt_row + 4, column=1, value="CBM :").font = bold
-    ws.cell(row=wt_row + 4, column=2).fill = yellow
-    ws.cell(row=wt_row + 4, column=2).border = box
-    cbm_result = ws.cell(
-        row=wt_row + 4, column=3,
-        value=f'=IF(B{wt_row + 4}="","",B{wt_row + 4}*{total_ctn_letter_final}{total_row})'
+    # Link top info block
+    pack_qty_cell.value = f"={gt_l}{ship_r}"
+    excess_cell.value   = f"={gt_l}{exs_r}"
+    pct_cell.value = (
+        f'=IF({gt_l}{exs_r}="","-",'
+        f'TEXT(IFERROR({gt_l}{exs_r}/{gt_l}{order_r},0),"0.00%"))'
     )
-    cbm_result.font = bold
-    cbm_result.border = box
-    cbm_result.alignment = center
 
-    first_sum_row = sum_header_row + 1
-    last_sum_row = sum_header_row + len(rows_needed)
+    # Grand total weights (merged block, centered)
+    first_sum = sum_header + 1
+    last_sum  = sum_header + len(rows_needed)
 
-    ws.merge_cells(start_row=first_sum_row, start_column=gw_col,
-                    end_row=last_sum_row, end_column=gw_col)
-    gw_cell = ws.cell(row=first_sum_row, column=gw_col,
-                       value=f'={total_grs_letter}{total_row}')
-    gw_cell.alignment = center
-    gw_cell.font = bold
-    gw_cell.border = box
+    put_merged(first_sum, gw_c1, last_sum, gw_c2,
+               f"={get_column_letter(COL_TOTAL_GRS)}{total_row}", font=bold)
+    ws.cell(row=first_sum, column=gw_c1).number_format = "0.00"
+    put_merged(first_sum, nw_c1, last_sum, nw_c2,
+               f"={get_column_letter(COL_TOTAL_NET)}{total_row}", font=bold)
+    ws.cell(row=first_sum, column=nw_c1).number_format = "0.00"
 
-    ws.merge_cells(start_row=first_sum_row, start_column=nw_col,
-                    end_row=last_sum_row, end_column=nw_col)
-    nw_cell = ws.cell(row=first_sum_row, column=nw_col,
-                       value=f'={total_net_letter}{total_row}')
-    nw_cell.alignment = center
-    nw_cell.font = bold
-    nw_cell.border = box
+    # =========================================================
+    # 8. Bottom weights + CTN MEAS + CBM  (labels RIGHT, values CENTER)
+    # =========================================================
+    wt_row = last_sum + 2
 
-    ws.column_dimensions["A"].width = 16
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 16
-    for i in range(n_sizes):
-        ws.column_dimensions[get_column_letter(5 + i)].width = 10
-    for col in range(5 + n_sizes, n_cols + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 13
-    ws.column_dimensions[get_column_letter(gw_col)].width = 22
-    ws.column_dimensions[get_column_letter(nw_col)].width = 22
+    c = ws.cell(row=wt_row, column=1, value="GROSS WEIGHT :")
+    c.font = bold
+    c.alignment = right
+    c = ws.cell(row=wt_row, column=2,
+                value=f"={get_column_letter(COL_TOTAL_GRS)}{total_row}")
+    c.font = bold
+    # c.border = box
+    c.alignment = center
 
-    legend_row = wt_row + 6
-    ws.cell(row=legend_row, column=1, value="Legend:").font = bold
-    ws.cell(row=legend_row + 1, column=1,
-            value="Yellow cells = data NOT available in the PO PDF (fill in from factory cutting/packing records)"
-            ).font = Font(name=FONT, size=9, italic=True)
+    c = ws.cell(row=wt_row + 1, column=1, value="NET WEIGHT :")
+    c.font = bold
+    c.alignment = right
+    c = ws.cell(row=wt_row + 1, column=2,
+                value=f"={get_column_letter(COL_TOTAL_NET)}{total_row}")
+    c.font = bold
+    # c.border = box
+    c.alignment = center
+
+    c = ws.cell(row=wt_row + 2, column=1, value="CTN MEAS :")
+    c.font = bold
+    c.alignment = right
+    for k, txt in enumerate(["L 24'' X W 16'' X H 10''", "L 24'' X W 16'' X H 6''"]):
+        put_merged(wt_row + 2 + k, 2, wt_row + 2 + k, 4, txt,
+                   font=normal, fill=yellow)
+
+    c = ws.cell(row=wt_row + 4, column=1, value="CBM :")
+    c.font = bold
+    c.alignment = right
+
+    cbm_per_cell = ws.cell(row=wt_row + 4, column=2, value=0.06295)  # ≈ 24*16*10 / 61000
+    cbm_per_cell.fill = yellow
+    # cbm_per_cell.border = box
+    cbm_per_cell.alignment = center
+    cbm_per_cell.number_format = "0.00000"
+
+    c = ws.cell(row=wt_row + 4, column=3,
+                value=f"=B{wt_row + 4}*{get_column_letter(COL_TOTAL_CTN)}{total_row}")
+    c.font = bold
+    # c.border = box
+    c.alignment = center
+    c.number_format = "0.00000"
+
+    # =========================================================
+    # 9. Signature block
+    # =========================================================
+    sig_row = wt_row + 7
+
+    sig_al = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    for col in (2, 5):
+        ws.cell(row=sig_row, column=col, value="_" * 14).alignment = sig_al
+    ws.cell(row=sig_row + 1, column=2, value="INCHARGE").font = bold
+    ws.cell(row=sig_row + 1, column=2).alignment = sig_al
+    ws.cell(row=sig_row + 1, column=5, value="FM").font = bold
+    ws.cell(row=sig_row + 1, column=5).alignment = sig_al
+
+    # Print setup: one page wide, landscape, centered on the page
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    from openpyxl.worksheet.properties import PageSetupProperties
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_options.horizontalCentered = True
+
+
+
+
+
+
+
 
 
 def build_workbook(data):
