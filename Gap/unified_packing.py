@@ -329,10 +329,23 @@ def run(file=None):
              "tick 🗑 on rows and press “Remove ticked rows”, or “Reset table to PO”. "
              "Multi Y and Multi N follow the PO rules and are shown read-only. "
              "Changing the variables above rebuilds the tables.")
+    ORDER_FWD = "Bulk, Single, Multi"
+    ORDER_REV = "Multi, Single, Bulk"
+    order_pick = st.radio(
+        "Carton serial order",
+        [ORDER_FWD, ORDER_REV],
+        index=0,
+        horizontal=True,
+        key="gap_serial_order",
+        help="Sets the order of the carton serial numbers, the tabs below and the Excel sections. "
+             "Multi Y always comes before Multi N.",
+    )
+    PACK_ORDER = ("Bulk", "Single", "Multi Y", "Multi N") if order_pick == ORDER_FWD \
+        else ("Multi Y", "Multi N", "Single", "Bulk")
     totals_box = st.container()
     
     tab_labels, tab_types = [], []
-    for ptype in PACK_TYPES:
+    for ptype in PACK_ORDER:
         if detected[ptype]:
             tab_labels.append(f"{ptype} ({len(detected[ptype])})")
             tab_types.append(ptype)
@@ -591,38 +604,46 @@ def run(file=None):
     
     
     next_ctn = 1
-    bulk_secs, single_secs = [], []
-    if auto_bulk:
-        with tab_of["Bulk"]:
-            bulk_secs, next_ctn = _editable_sections("Bulk", auto_bulk, next_ctn)
-    if auto_single:
-        with tab_of["Single"]:
-            single_secs, next_ctn = _editable_sections("Single", auto_single, next_ctn)
-    
-    multi_y_secs = build_multi_y_by_color(data, start_ctn=next_ctn) if detected["Multi Y"] else []
-    next_ctn += sum(s["ctn_total"] for s in multi_y_secs)
-    
-    multi_n_secs = []
+    bulk_secs, single_secs, multi_y_secs, multi_n_secs = [], [], [], []
     multi_n_xlsx = None
-    if detected["Multi N"]:
+    for ptype in PACK_ORDER:
+        if ptype == "Bulk" and auto_bulk:
+            with tab_of["Bulk"]:
+                bulk_secs, next_ctn = _editable_sections("Bulk", auto_bulk, next_ctn)
+        elif ptype == "Single" and auto_single:
+            with tab_of["Single"]:
+                single_secs, next_ctn = _editable_sections("Single", auto_single, next_ctn)
+        elif ptype == "Multi Y" and detected["Multi Y"]:
+            multi_y_secs = build_multi_y_by_color(data, start_ctn=next_ctn)
+            next_ctn += sum(s["ctn_total"] for s in multi_y_secs)
+        elif ptype == "Multi N" and detected["Multi N"]:
+            try:
+                multi_n_secs = build_multi_n(
+                    data, nw=DEFAULT_NW, tare_by_code=DEFAULT_TARE, net_deduct=net_deduct,
+                    default_per_ctn=prepacks_per_ctn, ctn_code=ctn_code, start_ctn_no=next_ctn,
+                )
+                next_ctn += sum(s.get("ctn_total", 0) for s in multi_n_secs)
+            except Exception as e:
+                st.error(f"Multi N build failed: {e}")
+    
+    _secs_of = {"Bulk": bulk_secs, "Single": single_secs, "Multi Y": multi_y_secs, "Multi N": multi_n_secs}
+    all_secs = [sec for _t in PACK_ORDER for sec in _secs_of[_t]]
+    grand_ctn = sum(s.get("ctn_total", 0) for s in all_secs)
+    grand_pcs = sum(s.get("ship_qty", 0) for s in all_secs)
+    
+    if multi_n_secs:
         try:
-            multi_n_secs = build_multi_n(
-                data, nw=DEFAULT_NW, tare_by_code=DEFAULT_TARE, net_deduct=net_deduct,
-                default_per_ctn=prepacks_per_ctn, ctn_code=ctn_code, start_ctn_no=next_ctn,
-            )
-            grand = next_ctn - 1 + sum(s.get("ctn_total", 0) for s in multi_n_secs)
             multi_n_xlsx = export_multi_n_excel(
                 multi_n_secs, DEFAULT_NW, DEFAULT_NNW, DEFAULT_TARE, net_deduct,
-                list(DEFAULT_CTN_MEAS), buyer, po_no, grand,
+                list(DEFAULT_CTN_MEAS), buyer, po_no, grand_ctn,
             )
         except Exception as e:
             st.error(f"Multi N build failed: {e}")
     
-    all_secs = bulk_secs + single_secs + multi_y_secs + multi_n_secs
-    grand_ctn = sum(s.get("ctn_total", 0) for s in all_secs)
-    grand_pcs = sum(s.get("ship_qty", 0) for s in all_secs)
-    
-    for ptype, secs in (("Multi Y", multi_y_secs), ("Multi N", multi_n_secs)):
+    for ptype in PACK_ORDER:
+        if ptype not in ("Multi Y", "Multi N"):
+            continue
+        secs = _secs_of[ptype]
         if not secs:
             continue
         with tab_of[ptype]:
@@ -696,6 +717,7 @@ def run(file=None):
             data, bulk_secs, single_secs, multi_y_secs, multi_n_secs,
             nw=user_nw, nnw=user_nnw, tare_by_code=user_tare,
             net_deduct={"Multi N": net_deduct},
+            order=list(PACK_ORDER),
         )
     except Exception as e:
         packing_all = None

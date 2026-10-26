@@ -45,6 +45,7 @@ def export_unified_excel(
     nnw: dict | None = None,
     tare_by_code: dict | None = None,
     net_deduct: dict | None = None,
+    order: list | None = None,
 ) -> bytes:
     """
     SINGLE-SHEET packing list for ALL GAP types (Bulk / Single / Multi Y / Multi N).
@@ -101,7 +102,12 @@ def export_unified_excel(
     po_no = str(header.get("P.O._#") or header.get("P.O. #") or "")
     oiqty = header.get("OIQTY") or 0
 
-    all_secs = list(bulk_secs) + list(single_secs) + list(multi_y_secs) + list(multi_n_secs)
+    # Section order on the sheet (default Bulk, Single, Multi Y, Multi N)
+    _by_type = {"Bulk": list(bulk_secs), "Single": list(single_secs),
+                "Multi Y": list(multi_y_secs), "Multi N": list(multi_n_secs)}
+    _order = [t for t in (order or ["Bulk", "Single", "Multi Y", "Multi N"]) if t in _by_type]
+    _order += [t for t in _by_type if t not in _order]
+    all_secs = [sec for t in _order for sec in _by_type[t]]
     grand_ctn = sum(s.get("ctn_total", 0) for s in all_secs)
 
     # Collect all sizes across every section (for NW table + consistent columns)
@@ -536,12 +542,7 @@ def export_unified_excel(
         }
 
     # Write each type in order; serial numbers restart per section
-    type_blocks = [
-        ("Bulk", bulk_secs),
-        ("Single", single_secs),
-        ("Multi Y", multi_y_secs),
-        ("Multi N", multi_n_secs),
-    ]
+    type_blocks = [(t, _by_type[t]) for t in _order]
     for type_label, secs in type_blocks:
         if not secs:
             continue
