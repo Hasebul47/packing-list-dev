@@ -50,7 +50,7 @@ DEFAULT_NNW = {
 # G81 = 0.71 is the value used by the Multi-N reference sheet
 # ("Style - 908546 PO - 61429740 ... Multi.xlsx"); the others come from
 # dummy_61480360_packing_list.xlsx.  All editable in the UI / sheet.
-DEFAULT_TARE = {"G81": 0.71, "G82": 0.71, "G84": 0.24, "G85": 0.24}
+DEFAULT_TARE = {"G81": 0.71, "G82": 0.71, "G84": 0.24, "G85": 0.24, "CC1": 1.0}
 DEFAULT_NET_DEDUCT = 0.42           # GROSS - NET for MULTI cartons
 DEFAULT_CTN_CODE = "G81"            # carton code used in the Multi-N reference
 DEFAULT_PREPACKS_PER_CTN = 4        # reference: 61 x 4 + 1 x 3 = 247

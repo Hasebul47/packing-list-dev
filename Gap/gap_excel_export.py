@@ -43,10 +43,18 @@ def _dims_only(m: str) -> str:
     return (m[: i + 2] if i >= 0 else m).strip()
 
 
+DEFAULT_BOX_SIZE = {
+    "G81": "58.67 X 38.48 X 29.71 CM",
+    "G82": "58.67 X 38.48 X 14.86 CM",
+    "G84": "38.48 X 29.33 X 14.86 CM",
+    "G85": "29.33 X 19.25 X 14.86 CM",
+    "CC1": "1 X 1 X 1 CM",
+}
+
+
 def default_box_size(codes) -> dict:
-    """First box size of DEFAULT_CTN_MEAS -> first CTN code, and so on."""
-    dims = [_dims_only(m) for m in DEFAULT_CTN_MEAS]
-    return {c: (dims[i] if i < len(dims) else "") for i, c in enumerate(codes)}
+    """Box size text for each CTN code (blank for an unknown code)."""
+    return {c: DEFAULT_BOX_SIZE.get(c, "") for c in codes}
 
 
 # ===========================================================================
