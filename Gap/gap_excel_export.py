@@ -315,6 +315,8 @@ def export_unified_excel(
 
     # ========== 3. PACKING SECTIONS ==========
     section_summary_refs = []  # for grand summary
+    _carton_cells = []         # (row, col, first_data_row) of every "CARTON  NN of TTT" cell
+    _carton_state = {"base": None, "prev_totals": []}   # running carton numbering across sections
 
     def _write_one_section(sec, start_r, serial_start=1):
         """Write one colour section. Returns (next_row, summary_ref_dict)."""
@@ -401,8 +403,16 @@ def export_unified_excel(
             # CTN FROM / CTN TO (two columns, matching reference)
             ctn_from_val = rowd.get("ctn_from", k + 1)
             ctn_to_val = rowd.get("ctn_to") or ctn_from_val
-            ws.cell(nonlocal_r, col_idx["CTN FROM"], ctn_from_val).alignment = ctr
-            ws.cell(nonlocal_r, col_idx["CTN TO"], ctn_to_val).alignment = ctr
+            if _carton_state["base"] is None:
+                _carton_state["base"] = int(ctn_from_val or 1)
+            _start = str(_carton_state["base"]) + "".join(f"+{t}" for t in _carton_state["prev_totals"])
+            _cq = L(col_idx["CTN QTY"])
+            # FROM = section start + all CTN QTY above in this section (range from the header row,
+            # so deleting any data row never creates #REF!);  TO = FROM + CTN QTY - 1
+            ws.cell(nonlocal_r, col_idx["CTN FROM"],
+                    f"={_start}+SUM({_cq}{header_row}:{_cq}{nonlocal_r - 1})").alignment = ctr
+            ws.cell(nonlocal_r, col_idx["CTN TO"],
+                    f"={L(col_idx['CTN FROM'])}{nonlocal_r}+{_cq}{nonlocal_r}-1").alignment = ctr
             # CTN MES. — prefer short code (G81); extract if full dimension given
             mes = rowd.get("ctn_mes", "") or ""
             if " " in str(mes):
@@ -505,6 +515,20 @@ def export_unified_excel(
             _mc = L(col_idx["CTN MES."])
             _dv.add(f"{_mc}{first_data}:{_mc}{last_data}")
 
+            # COLOR: merge consecutive rows that carry the same colour (inside this section only)
+            _cc = col_idx["COLOR"]
+            _run_start = first_data
+            for _rr in range(first_data + 1, last_data + 2):
+                _same = (_rr <= last_data and ws.cell(_rr, _cc).value == ws.cell(_run_start, _cc).value)
+                if _same:
+                    continue
+                if _rr - 1 > _run_start:
+                    ws.merge_cells(start_row=_run_start, start_column=_cc, end_row=_rr - 1, end_column=_cc)
+                    ws.cell(_run_start, _cc).alignment = ctr
+                    for _x in range(_run_start, _rr):
+                        ws.cell(_x, _cc).border = thin
+                _run_start = _rr
+
         # --- TOTAL row ---
         tr = nonlocal_r
         ws.cell(tr, col_idx["SL#"], "").border = thin
@@ -539,6 +563,10 @@ def export_unified_excel(
             cell.fill = total_fill
             cell.border = thin
             cell.alignment = ctr
+
+        if first_data <= last_data:
+            _carton_cells.append((hdr0 + 3, rc_val, first_data))
+            _carton_state["prev_totals"].append(f"{ctn_letter}{tr}")
 
         # link PO header ship / ctn / excess to TOTAL
         ship_cell.value = f"={tot_letter}{tr}"
@@ -590,6 +618,13 @@ def export_unified_excel(
         for sec in secs:
             r, refs = _write_one_section(sec, r, serial_start=1)
             section_summary_refs.append(refs)
+
+    # CARTON  "NN of TTT"  -> live: NN = first CTN FROM of the section, TTT = all CTN QTY totals
+    if _carton_cells:
+        _all_tot = "+".join(_carton_state["prev_totals"])
+        _from_col = L(col_idx["CTN FROM"])
+        for _r, _c, _fd in _carton_cells:
+            ws.cell(_r, _c).value = f'=TEXT({_from_col}{_fd},"00")&" of "&({_all_tot})'
 
     # ========== 4. COLOR-WISE SUMMARY + G. TOTAL SUMMARY (same sheet) ==========
     # Layout matches reference:

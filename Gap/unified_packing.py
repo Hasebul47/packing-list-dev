@@ -137,9 +137,29 @@ def render_plist_table(sec: dict):
     cols = list(recs[0].keys())
     th = "".join(f"<th>{c}</th>" for c in cols)
     body = ""
-    for rec in recs:
-        cls = ' class="total"' if str(rec.get("CTN NO", "")).upper() == "TOTAL" else ""
-        tds = "".join(f"<td>{rec.get(c, '')}</td>" for c in cols)
+    is_total = [str(r.get("CTN NO", "")).upper() == "TOTAL" for r in recs]
+    # COLOR: merge consecutive rows with the same colour (rowspan); TOTAL row never merges
+    span = {}
+    if "COLOR" in cols:
+        i = 0
+        while i < len(recs):
+            j = i + 1
+            if not is_total[i]:
+                while j < len(recs) and not is_total[j] and recs[j].get("COLOR") == recs[i].get("COLOR"):
+                    j += 1
+            span[i] = j - i
+            i = j
+    for n, rec in enumerate(recs):
+        cls = ' class="total"' if is_total[n] else ""
+        tds = ""
+        for c in cols:
+            if c == "COLOR":
+                if n not in span:
+                    continue                      # swallowed by the rowspan above
+                rs = f' rowspan="{span[n]}" style="vertical-align:middle;text-align:center"' if span[n] > 1 else ""
+                tds += f"<td{rs}>{rec.get(c, '')}</td>"
+            else:
+                tds += f"<td>{rec.get(c, '')}</td>"
         body += f"<tr{cls}>{tds}</tr>"
     st.markdown(
         f'<div class="plist-wrap"><table class="plist"><tr>{th}</tr>{body}</table></div>',
