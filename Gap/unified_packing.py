@@ -102,9 +102,11 @@ def render_section_strip(title: str):
     st.markdown(f'<div class="cc-strip">{title}</div>', unsafe_allow_html=True)
 
 
-def render_po_header_html(sec: dict, buyer: str, po_no: str, grand_ctn: int):
+def render_po_header_html(sec: dict, buyer: str, po_no: str, grand_ctn: int, dc: str = ""):
     ctn_from = sec["rows"][0]["ctn_from"] if sec.get("rows") else 1
     exs = sec["ship_qty"] - sec["qty_ordered"]
+    dc_line = (f'<div class="po-line"><span class="po-label">DC</span><span class="po-colon">:</span>'
+               f'<span>{dc}</span></div>')
     html = f"""
 <div class="plist-wrap">
   <div class="po-grid">
@@ -118,6 +120,7 @@ def render_po_header_html(sec: dict, buyer: str, po_no: str, grand_ctn: int):
       <div class="po-line"><span class="po-label">CTN QTY</span><span class="po-colon">:</span><span>{sec['ctn_total']} CTNS</span></div>
     </div>
     <div style="margin-top:48px">
+      {dc_line}
       <div class="po-line"><span class="po-label">PO #</span><span class="po-colon">:</span><span>{po_no}</span></div>
       <div class="po-line"><span class="po-label">SKU / Item</span><span class="po-colon">:</span><span>{sec.get('style_full','')}</span></div>
       <div class="po-line"><span class="po-label">Unit / Prepack</span><span class="po-colon">:</span><span>{sec.get('units_per_prepack',1)}</span></div>
@@ -236,6 +239,7 @@ def run(file=None):
     buyer = header.get("BUYER") or "OLD NAVY"
     style = header.get("STYLE") or ""
     po_no = str(header.get("P.O._#") or header.get("P.O. #") or "")
+    dc_code = str(header.get("DC") or "")
     oiqty = header.get("OIQTY") or 0
     
     detected = detect_all(data)
@@ -676,7 +680,7 @@ def run(file=None):
         with tab_of[ptype]:
             for sec in secs:
                 render_section_strip(STRIP[ptype])
-                render_po_header_html(sec, buyer, po_no, grand_ctn)
+                render_po_header_html(sec, buyer, po_no, grand_ctn, dc_code)
                 if ptype == "Multi N":
                     sizes = sec.get("sizes") or []
                     recs = []

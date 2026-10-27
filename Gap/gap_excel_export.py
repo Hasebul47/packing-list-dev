@@ -123,6 +123,7 @@ def export_unified_excel(
     buyer = header.get("BUYER") or "OLD NAVY"
     style = header.get("STYLE") or ""
     po_no = str(header.get("P.O._#") or header.get("P.O. #") or "")
+    dc_code = str(header.get("DC") or "")
     oiqty = header.get("OIQTY") or 0
 
     # Section order on the sheet (default Bulk, Single, Multi Y, Multi N)
@@ -372,6 +373,8 @@ def export_unified_excel(
             ("Unit / Prepack", str(sec.get("units_per_prepack", 1))),
             ("CARTON", f"{int(ctn_from0):02d} of {grand_ctn}"),
         ]
+        right_items.insert(0, ("DC", dc_code))              # DC on top of the right block (blank if not in PO)
+        carton_idx = len(right_items) - 1
         left_fit = Alignment(horizontal="left", vertical="center", shrink_to_fit=True)
         for i, (lab, val) in enumerate(right_items):
             ws.cell(hdr0 + i, rc_lab, lab).font = font_bold
@@ -565,7 +568,7 @@ def export_unified_excel(
             cell.alignment = ctr
 
         if first_data <= last_data:
-            _carton_cells.append((hdr0 + 3, rc_val, first_data))
+            _carton_cells.append((hdr0 + carton_idx, rc_val, first_data))
             _carton_state["prev_totals"].append(f"{ctn_letter}{tr}")
 
         # link PO header ship / ctn / excess to TOTAL

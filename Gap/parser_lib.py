@@ -126,6 +126,7 @@ def parse_po_header(text: str) -> dict:
         "BUYER": None,
         "STYLE": None,
         "P.O._#": None,
+        "DC": None,
         "OIQTY": 0,
         "SHIP_QTY": 0,
         "EX_SHORT": 0,
@@ -174,6 +175,11 @@ def parse_po_header(text: str) -> dict:
     if not header["STYLE"]:
         m = re.search(r"^\d{4} (\d{6,}) ", text, re.M)
         header["STYLE"] = m.group(1) if m else None
+
+    # ---- DC code: "Ship To SDC-0017 (000000017)" ----
+    m = re.search(r"Ship To\s+([A-Z0-9][A-Z0-9\-]*)\s*\(", text)
+    if m:
+        header["DC"] = m.group(1).strip()
 
     # Fallback: if OIQTY not found, sum from all "Total" lines later
     return header
