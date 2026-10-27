@@ -52,7 +52,7 @@ from multi_n_core import (
     DEFAULT_TARE,
     build_multi_n,
 )
-from gap_excel_export import export_multi_n_excel, export_unified_excel
+from gap_excel_export import default_box_size, export_multi_n_excel, export_unified_excel
 
 PACK_TYPES = ("Bulk", "Single", "Multi Y", "Multi N")
 
@@ -103,11 +103,6 @@ def render_section_strip(title: str):
 
 
 def render_po_header_html(sec: dict, buyer: str, po_no: str, grand_ctn: int):
-    meas = "".join(
-        f'<div class="po-line"><span class="po-label">CTN MEAS.</span>'
-        f'<span class="po-colon">:</span><span>{m}</span></div>'
-        for m in (sec.get("ctn_meas_list") or DEFAULT_CTN_MEAS)
-    )
     ctn_from = sec["rows"][0]["ctn_from"] if sec.get("rows") else 1
     exs = sec["ship_qty"] - sec["qty_ordered"]
     html = f"""
@@ -121,7 +116,6 @@ def render_po_header_html(sec: dict, buyer: str, po_no: str, grand_ctn: int):
       <div class="po-line"><span class="po-label">SHIP QTY</span><span class="po-colon">:</span><span>{sec['ship_qty']} PCS</span></div>
       <div class="po-line"><span class="po-label">EX/SHORT</span><span class="po-colon">:</span><span>{exs} PCS</span></div>
       <div class="po-line"><span class="po-label">CTN QTY</span><span class="po-colon">:</span><span>{sec['ctn_total']} CTNS</span></div>
-      {meas}
     </div>
     <div style="margin-top:48px">
       <div class="po-line"><span class="po-label">PO #</span><span class="po-colon">:</span><span>{po_no}</span></div>
@@ -296,15 +290,19 @@ def run(file=None):
         user_nw = {s: float(edited_nw.loc["N.W", s] or 0) for s in _nw_sizes}
         user_nnw = {s: float(edited_nw.loc["N.N.W", s] or 0) for s in _nw_sizes}
     
-        # ----- Table B: Empty carton weight by CTN CODE (separate 2-row table) -----
-        st.markdown("**Empty carton weight by CTN CODE** — editable (separate table)")
+        # ----- Table B: Box size / CTN CODE / Empty carton weight — ONE common table -----
+        st.markdown("**Box size, CTN CODE and empty carton weight** — editable (shown once in the packing list)")
         _tare_codes = list(DEFAULT_TARE.keys()) or ["G81", "G82", "G84", "G85"]
-        _tare_row = {c: float(DEFAULT_TARE.get(c, 0.71)) for c in _tare_codes}
+        _box_def = default_box_size(_tare_codes)
         tare_df = pd.DataFrame(
-            [_tare_row],
-            index=["EMPTY CTN WT"],
+            [
+                {c: _box_def.get(c, "") for c in _tare_codes},
+                {c: f"{float(DEFAULT_TARE.get(c, 0.71)):.2f}" for c in _tare_codes},
+            ],
+            index=["BOX SIZE", "EMPTY CTN WT"],
             columns=_tare_codes,
         )
+        tare_df.columns.name = "CTN CODE"
         edited_tare = st.data_editor(
             tare_df,
             key="tare_table",
@@ -313,12 +311,20 @@ def run(file=None):
             num_rows="fixed",
             disabled=False,
         )
-        user_tare = {c: float(edited_tare.loc["EMPTY CTN WT", c] or 0) for c in _tare_codes}
-    
+
+        def _num(v, d):
+            try:
+                return float(str(v).replace(",", "").strip())
+            except (TypeError, ValueError):
+                return d
+        user_tare = {c: _num(edited_tare.loc["EMPTY CTN WT", c], float(DEFAULT_TARE.get(c, 0.71)))
+                     for c in _tare_codes}
+        user_box = {c: str(edited_tare.loc["BOX SIZE", c] or "").strip() for c in _tare_codes}
+
     sig = hashlib.md5(repr((prepacks_per_ctn, single_max_pp, excess_pct, sorted(caps.items()),
                             net_deduct, ctn_code,
                             sorted(user_nw.items()), sorted(user_nnw.items()),
-                            sorted(user_tare.items()))).encode()).hexdigest()[:10]
+                            sorted(user_tare.items()), sorted(user_box.items()))).encode()).hexdigest()[:10]
     
     # ---- automatic plan (before the user's edits) --------------------------------
     auto_bulk = build_bulk_by_color(data, start_ctn=1, caps=caps, excess_pct=excess_pct) if detected["Bulk"] else []
@@ -715,7 +721,7 @@ def run(file=None):
     try:
         packing_all = export_unified_excel(
             data, bulk_secs, single_secs, multi_y_secs, multi_n_secs,
-            nw=user_nw, nnw=user_nnw, tare_by_code=user_tare,
+            nw=user_nw, nnw=user_nnw, tare_by_code=user_tare, ctn_box=user_box,
             net_deduct={"Multi N": net_deduct},
             order=list(PACK_ORDER),
         )

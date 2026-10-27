@@ -35,6 +35,19 @@ __all__ = ["export_unified_excel", "export_multi_n_excel"]
 
 FONT = "Courier New"
 
+# Box size (mm-free text) shown once in the common CTN table: code -> "L X W X H CM"
+def _dims_only(m: str) -> str:
+    """'58.67 X 38.48 X 29.71 CM.G8. SL' -> '58.67 X 38.48 X 29.71 CM'."""
+    m = " ".join(str(m).split())
+    i = m.upper().find("CM")
+    return (m[: i + 2] if i >= 0 else m).strip()
+
+
+def default_box_size(codes) -> dict:
+    """First box size of DEFAULT_CTN_MEAS -> first CTN code, and so on."""
+    dims = [_dims_only(m) for m in DEFAULT_CTN_MEAS]
+    return {c: (dims[i] if i < len(dims) else "") for i, c in enumerate(codes)}
+
 
 # ===========================================================================
 # 1. Main workbook - all pack types on one sheet
@@ -46,6 +59,7 @@ def export_unified_excel(
     tare_by_code: dict | None = None,
     net_deduct: dict | None = None,
     order: list | None = None,
+    ctn_box: dict | None = None,
 ) -> bytes:
     """
     SINGLE-SHEET packing list for ALL GAP types (Bulk / Single / Multi Y / Multi N).
@@ -212,34 +226,55 @@ def export_unified_excel(
     nw_cell_ref = {s: f"${L(nw_start_col + i)}${nw_row}" for i, s in enumerate(size_set)}
     r = nnw_row + 2
 
-    # ========== 2b. TABLE B — Empty carton weight by CTN CODE (separate, editable, centred) ==========
+    # ========== 2b. TABLE B — Box size / CTN CODE / Empty carton weight (ONE common table) ==========
+    #   Box Size    | 58.67 X 38.48 X 29.71 CM | ...      (each code = 2 merged columns)
+    #   CTN CODE    | G81                      | ...
+    #   EMPTY CTN WT| 0.71                     | ...
     tare_codes = list(tare_by_code.keys()) or ["G81", "G82", "G84", "G85"]
-    tare_label_col = _centered_start(len(tare_codes))     # centred on its own
+    box_by_code = {**default_box_size(tare_codes), **(ctn_box or {})}
+    CODE_SPAN = 2
+    tare_label_col = _centered_start(len(tare_codes) * CODE_SPAN)     # centred on its own
     tare_start_col = tare_label_col + LABEL_SPAN
-    tare_header_row = r
-    tare_val_row = r + 1
+    box_row = r
+    tare_header_row = r + 1
+    tare_val_row = r + 2
 
+    _label(box_row, tare_label_col, "Box Size", header=True)
     _label(tare_header_row, tare_label_col, "CTN CODE", header=True)
     _label(tare_val_row, tare_label_col, "EMPTY CTN WT")
 
     tare_cell_ref = {}
+    fit_ctr = Alignment(horizontal="center", vertical="center", shrink_to_fit=True)
     for i, code in enumerate(tare_codes):
-        c = tare_start_col + i
-        cell = ws.cell(tare_header_row, c, code)
+        c = tare_start_col + i * CODE_SPAN
+        for rr_ in (box_row, tare_header_row, tare_val_row):
+            ws.merge_cells(start_row=rr_, start_column=c, end_row=rr_, end_column=c + CODE_SPAN - 1)
+            for cc_ in range(c, c + CODE_SPAN):
+                ws.cell(rr_, cc_).border = thin
+
+        cell = ws.cell(box_row, c, box_by_code.get(code, ""))
         cell.font = header_font
         cell.fill = header_fill
+        cell.alignment = fit_ctr
+        for cc_ in range(c, c + CODE_SPAN):
+            ws.cell(box_row, cc_).fill = header_fill
+
+        cell = ws.cell(tare_header_row, c, code)
+        cell.font = header_font
         cell.alignment = ctr
-        cell.border = thin
+        for cc_ in range(c, c + CODE_SPAN):
+            ws.cell(tare_header_row, cc_).fill = header_fill
 
         cell = ws.cell(tare_val_row, c, float(tare_by_code.get(code, 0.71)))
         cell.number_format = "0.00"
-        cell.fill = yellow
         cell.alignment = ctr
-        cell.border = thin
+        for cc_ in range(c, c + CODE_SPAN):
+            ws.cell(tare_val_row, cc_).fill = yellow
         tare_cell_ref[code] = f"${L(c)}${tare_val_row}"
 
-    tare_hdr_rng = f"${L(tare_start_col)}${tare_header_row}:${L(tare_start_col + len(tare_codes) - 1)}${tare_header_row}"
-    tare_val_rng = f"${L(tare_start_col)}${tare_val_row}:${L(tare_start_col + len(tare_codes) - 1)}${tare_val_row}"
+    _tare_end = tare_start_col + len(tare_codes) * CODE_SPAN - 1
+    tare_hdr_rng = f"${L(tare_start_col)}${tare_header_row}:${L(_tare_end)}${tare_header_row}"
+    tare_val_rng = f"${L(tare_start_col)}${tare_val_row}:${L(_tare_end)}${tare_val_row}"
     r = tare_val_row + 2
 
     # ========== 2c. TABLE C — Net deduct by PACK TYPE (editable, centred) ==========
@@ -312,11 +347,7 @@ def export_unified_excel(
         ctn_hdr_cell = ws.cell(hdr0 + 6, 3)
         ctn_hdr_cell.number_format = '#,##0 "CTNS"'
 
-        meas_list = sec.get("ctn_meas_list") or list(DEFAULT_CTN_MEAS)
-        for i, m in enumerate(meas_list):
-            ws.cell(hdr0 + 7 + i, 1, "CTN MEAS.").font = font_bold
-            ws.cell(hdr0 + 7 + i, 2, ":")
-            ws.cell(hdr0 + 7 + i, 3, m)
+        # CTN MEAS. lines are not repeated per section: box sizes sit once in the common CTN table above.
 
         # ----- RIGHT TOP block (exactly top-right of this section) -----
         # Labels + values aligned with BUYER / STYLE / P.O. / O/QTY rows
@@ -339,7 +370,7 @@ def export_unified_excel(
             cell.font = font_norm
             cell.border = Border(bottom=Side(style="thin"))
 
-        nonlocal_r = hdr0 + 7 + len(meas_list) + 1
+        nonlocal_r = hdr0 + 7 + 1
 
         # --- column headers ---
         header_row = nonlocal_r
