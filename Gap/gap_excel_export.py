@@ -26,6 +26,7 @@ import io
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as L
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.properties import PageSetupProperties
 
 from color_builders import DEFAULT_CTN_MEAS, DEFAULT_NW, NET_DEDUCT, sort_sizes
@@ -494,6 +495,16 @@ def export_unified_excel(
 
         last_data = nonlocal_r - 1
 
+        # CTN MES. drop-down (codes of the common CTN table); Gross/Net formulas follow the choice
+        if first_data <= last_data:
+            _dv = DataValidation(type="list", formula1='"' + ",".join(tare_codes) + '"',
+                                 allow_blank=True, showDropDown=False)
+            _dv.error = "Pick a carton code from the list"
+            _dv.errorTitle = "CTN MES."
+            ws.add_data_validation(_dv)
+            _mc = L(col_idx["CTN MES."])
+            _dv.add(f"{_mc}{first_data}:{_mc}{last_data}")
+
         # --- TOTAL row ---
         tr = nonlocal_r
         ws.cell(tr, col_idx["SL#"], "").border = thin
@@ -502,25 +513,16 @@ def export_unified_excel(
         tot_letter = L(col_idx["TOTAL QTY"])
         qp_letter = L(col_idx["QTY PER CTN"])
 
-        def _row_product_sum(col_letter: str) -> str:
-            parts = [f"{col_letter}{rr}*{ctn_letter}{rr}"
-                     for rr in range(first_data, last_data + 1)]
-            return "=" + "+".join(parts) if parts else "=0"
+        def _range_sumproduct(col_letter: str) -> str:
+            """Range based (survives deleting rows in Excel, no per-row hard-coded cells)."""
+            return (f"=SUMPRODUCT({col_letter}{first_data}:{col_letter}{last_data},"
+                    f"{ctn_letter}{first_data}:{ctn_letter}{last_data})")
 
         if first_data <= last_data:
             ws.cell(tr, col_idx["CTN QTY"],
                     f"=SUM({ctn_letter}{first_data}:{ctn_letter}{last_data})")
             for s in size_set:
-                cl = L(col_idx[s])
-                if pack in ("Bulk", "Single"):
-                    ws.cell(tr, col_idx[s], _row_product_sum(cl))
-                else:
-                    # Multi: size units * CTN QTY  (QTY PER CTN already embeds prepacks)
-                    parts = [
-                        f"{cl}{rr}*{ctn_letter}{rr}"
-                        for rr in range(first_data, last_data + 1)
-                    ]
-                    ws.cell(tr, col_idx[s], "=" + "+".join(parts) if parts else "=0")
+                ws.cell(tr, col_idx[s], _range_sumproduct(L(col_idx[s])))
             ws.cell(tr, col_idx["TOTAL QTY"],
                     f"=SUM({tot_letter}{first_data}:{tot_letter}{last_data})")
             for wcol in ("GROSS WEIGHT", "NET WEIGHT"):

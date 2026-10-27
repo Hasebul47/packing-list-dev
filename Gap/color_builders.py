@@ -76,7 +76,7 @@ BULK_CTN_CAP = {
 }
 DEFAULT_CTN_CAP = 20          # sizes not listed above (e.g. boys numeric) - check!
 DEFAULT_EXCESS_PCT = 3.0      # max over-shipment per size, added to Bulk only
-CARTON_TARE = {"G81": 0.71, "G82": 0.71, "G84": 0.24, "G85": 0.24}
+CARTON_TARE = {"G81": 0.71, "G82": 0.71, "G84": 0.24, "G85": 0.24, "CC1": 0.71}
 NET_DEDUCT = {"Bulk": 0.24, "Single": 0.24, "Multi Y": 0.42, "Multi N": 0.42}
 
 
@@ -100,8 +100,11 @@ def carton_code(size: str, qty: int) -> str:
     return "G85"
 
 
-def carton_weights(size: str, qty: int, code: str, pack_type: str) -> tuple[float, float]:
-    gross = round(qty * DEFAULT_NW.get(size, 0.5) + CARTON_TARE.get(code, 0.71), 2)
+def carton_weights(size: str, qty: int, code: str, pack_type: str,
+                   tare: dict | None = None) -> tuple[float, float]:
+    """tare: optional {carton code: empty carton weight} (e.g. edited in the UI)."""
+    _t = tare if tare else CARTON_TARE
+    gross = round(qty * DEFAULT_NW.get(size, 0.5) + _t.get(code, CARTON_TARE.get(code, 0.71)), 2)
     net = round(gross - NET_DEDUCT.get(pack_type, 0.24), 2)
     return gross, net
 
@@ -261,7 +264,7 @@ def build_multi_y_by_color(data: dict, start_ctn: int = 1) -> list[dict]:
 
         ctn_qty = total_pp  # Multi Y: Full Carton = Y → 1 prepack = 1 carton
         cd = color_code(color_raw)
-        ctn_code = "G82"
+        ctn_code = "CC1"        # Multi Y default carton
         rows_out = [{
             "ctn_from": next_ctn,
             "ctn_to": next_ctn + ctn_qty - 1 if ctn_qty else next_ctn,

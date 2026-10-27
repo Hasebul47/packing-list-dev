@@ -450,7 +450,8 @@ def run(file=None):
                 "🗑": st.column_config.CheckboxColumn("🗑", default=False, width="small",
                                                       help="Tick to delete row"),
                 "CTN NO": st.column_config.TextColumn("CTN NO"),
-                "CTN MES": st.column_config.TextColumn("CTN MES"),
+                "CTN MES": st.column_config.SelectboxColumn("CTN MES", options=list(user_tare.keys()), required=False,
+                                                             help="Pick the carton code — carton weight (Gross/Net) follows it"),
                 "CTN QTY": st.column_config.NumberColumn("CTN QTY", min_value=0, step=1, format="%d"),
                 "COLOR": st.column_config.TextColumn("COLOR"),
                 "PREPACK STECKER": st.column_config.TextColumn("PREPACK STECKER"),
@@ -506,7 +507,7 @@ def run(file=None):
                     gross = net = None
                     if size and qty_per > 0:
                         try:
-                            gross, net = carton_weights(size, qty_per, code or "G81", ptype)
+                            gross, net = carton_weights(size, qty_per, code or "G81", ptype, tare=user_tare)
                         except Exception:
                             pass
                     out.at[idx, "QTY PER CTN"] = int(qty_per)
